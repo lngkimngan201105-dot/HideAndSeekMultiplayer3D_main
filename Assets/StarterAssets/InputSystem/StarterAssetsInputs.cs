@@ -12,6 +12,9 @@ namespace StarterAssets
 		public Vector2 look;
 		public bool jump;
 		public bool sprint;
+		public bool interact;
+		public bool cancelDisguise;
+		public bool spectatorToggle;
 
 		[Header("Movement Settings")]
 		public bool analogMovement;
@@ -43,6 +46,21 @@ namespace StarterAssets
 		{
 			SprintInput(value.isPressed);
 		}
+
+		public void OnInteract(InputValue value)
+		{
+			InteractInput(value.isPressed);
+		}
+
+		public void OnCancelDisguise(InputValue value)
+		{
+			CancelDisguiseInput(value.isPressed);
+		}
+
+		public void OnSpectatorToggle(InputValue value)
+		{
+			SpectatorToggleInput(value.isPressed);
+		}
 #endif
 
 
@@ -65,7 +83,29 @@ namespace StarterAssets
 		{
 			sprint = newSprintState;
 		}
-		
+
+		public void InteractInput(bool newInteractState)
+		{
+			interact = newInteractState;
+		}
+
+		public void CancelDisguiseInput(bool newCancelState)
+		{
+			cancelDisguise = newCancelState;
+		}
+
+		public void SpectatorToggleInput(bool newSpectatorToggleState)
+		{
+			spectatorToggle = newSpectatorToggleState;
+		}
+
+		public void ResetOneShotPropHuntInputs()
+		{
+			interact = false;
+			cancelDisguise = false;
+			spectatorToggle = false;
+		}
+
 		private void OnApplicationFocus(bool hasFocus)
 		{
 			SetCursorState(cursorLocked);

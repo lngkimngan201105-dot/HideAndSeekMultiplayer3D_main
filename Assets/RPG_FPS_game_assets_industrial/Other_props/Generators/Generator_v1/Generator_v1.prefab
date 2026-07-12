@@ -12,6 +12,7 @@ GameObject:
   - component: {fileID: 33000010504642394}
   - component: {fileID: 23000013333625452}
   - component: {fileID: 65000011853629088}
+  - component: {fileID: 5006354640896048143}
   m_Layer: 0
   m_Name: Generator_v1
   m_TagString: Untagged
@@ -105,3 +106,21 @@ BoxCollider:
   serializedVersion: 3
   m_Size: {x: 3.6483622, y: 1.7470865, z: 1.3051324}
   m_Center: {x: 0.000000059604645, y: 0.000000029802322, z: -0.00000035762787}
+--- !u!114 &5006354640896048143
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1000010628347772}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 75d3793170969eb46bb6a5afedf43db8, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  propId: Generator_v1
+  displayName: Generator_v 1
+  visualPrefab: {fileID: 1000010628347772}
+  visualOffset: {x: 0, y: 0, z: 0}
+  visualRotationOffset: {x: 0, y: 0, z: 0}
+  visualScale: 1
