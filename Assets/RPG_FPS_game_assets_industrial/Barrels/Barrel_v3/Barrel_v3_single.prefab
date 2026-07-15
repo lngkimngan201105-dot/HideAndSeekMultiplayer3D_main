@@ -121,7 +121,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Barrel_v3_single
   displayName: Barrel_v 3_single
-  visualPrefab: {fileID: 1000012364095318}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300004, guid: 8bf7537d27999d4448c4145cad1f47e7, type: 3}
+    materials:
+    - {fileID: 2100000, guid: f15201246572bdb49bcb3594bf3000f3, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

@@ -65,10 +65,64 @@ public static class PropHuntSetupTool
 
             propTarget.propId = propName;
             propTarget.displayName = ObjectNames.NicifyVariableName(propName);
-            propTarget.visualPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            propTarget.visualPrefab = null;
             propTarget.visualOffset = Vector3.zero;
             propTarget.visualRotationOffset = Vector3.zero;
             propTarget.visualScale = 1f;
+
+            List<PropVisualPartData> visualParts = new List<PropVisualPartData>();
+            foreach (MeshRenderer renderer in prefabRoot.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                MeshFilter meshFilter = renderer.GetComponent<MeshFilter>();
+                if (meshFilter == null || meshFilter.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                Mesh mesh = meshFilter.sharedMesh;
+                if (IsCombinedMesh(mesh))
+                {
+                    Debug.LogError($"PropHuntSetupTool: rejected Combined Mesh '{mesh.name}' for '{prefabRoot.name}'.");
+                    continue;
+                }
+
+                string meshAssetPath = AssetDatabase.GetAssetPath(mesh);
+                if (string.IsNullOrEmpty(meshAssetPath))
+                {
+                    Debug.LogError(
+                        $"PropHuntSetupTool: rejected non-asset mesh '{mesh.name}' for '{prefabRoot.name}'."
+                    );
+                    continue;
+                }
+
+                Transform rendererTransform = renderer.transform;
+                Vector3 rootScale = prefabRoot.transform.lossyScale;
+                Vector3 rendererScale = rendererTransform.lossyScale;
+                visualParts.Add(new PropVisualPartData
+                {
+                    mesh = mesh,
+                    materials = renderer.sharedMaterials,
+                    localPosition = prefabRoot.transform.InverseTransformPoint(rendererTransform.position),
+                    localEulerAngles =
+                        (Quaternion.Inverse(prefabRoot.transform.rotation) * rendererTransform.rotation).eulerAngles,
+                    localScale = new Vector3(
+                        SafeScaleRatio(rendererScale.x, rootScale.x),
+                        SafeScaleRatio(rendererScale.y, rootScale.y),
+                        SafeScaleRatio(rendererScale.z, rootScale.z)
+                    )
+                });
+
+                Debug.Log(
+                    $"PropHuntSetupTool: stored original mesh '{mesh.name}' from asset '{meshAssetPath}' " +
+                    $"for '{prefabRoot.name}'."
+                );
+            }
+
+            propTarget.visualParts = visualParts.ToArray();
+            if (propTarget.visualParts.Length == 0)
+            {
+                Debug.LogError($"PropHuntSetupTool: '{prefabRoot.name}' has no valid original visual parts.");
+            }
 
             PrefabUtility.SaveAsPrefabAsset(prefabRoot, path);
             PrefabUtility.UnloadPrefabContents(prefabRoot);
@@ -88,6 +142,8 @@ public static class PropHuntSetupTool
     private static void ConfigureMapScene()
     {
         Scene scene = EditorSceneManager.OpenScene(MapV2Path, OpenSceneMode.Single);
+
+        ConfigureScenePropPrefabReferences();
 
         foreach (GameObject root in scene.GetRootGameObjects())
         {
@@ -111,13 +167,48 @@ public static class PropHuntSetupTool
         Debug.Log("PropHuntSetupTool: configured Map_v2 scene.");
     }
 
+    private static void ConfigureScenePropPrefabReferences()
+    {
+        foreach (PropTarget propTarget in UnityEngine.Object.FindObjectsOfType<PropTarget>(true))
+        {
+            string prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(propTarget.gameObject);
+            if (string.IsNullOrEmpty(prefabPath))
+            {
+                continue;
+            }
+
+            GameObject prefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+            PropTarget prefabPropTarget = prefabAsset != null ? prefabAsset.GetComponent<PropTarget>() : null;
+            if (prefabPropTarget == null)
+            {
+                continue;
+            }
+
+            propTarget.visualPrefab = null;
+            propTarget.visualParts = prefabPropTarget.visualParts;
+            PrefabUtility.RecordPrefabInstancePropertyModifications(propTarget);
+            EditorUtility.SetDirty(propTarget);
+        }
+    }
+
+    private static bool IsCombinedMesh(Mesh mesh)
+    {
+        return mesh != null &&
+               mesh.name.IndexOf("Combined Mesh", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static float SafeScaleRatio(float value, float divisor)
+    {
+        return Mathf.Abs(divisor) > 0.0001f ? value / divisor : value;
+    }
+
     private static void ConfigurePlayerObject(GameObject player, Camera preferredFpsCamera)
     {
         Transform playerTransform = player.transform;
         Transform playerCameraRoot = GetOrCreateChild(playerTransform, "PlayerCameraRoot", new Vector3(0f, 1.375f, 0f));
-        Transform humanVisualRoot = GetOrCreateChild(playerTransform, "HumanVisualRoot", Vector3.zero);
-        Transform propVisualRoot = GetOrCreateChild(playerTransform, "PropVisualRoot", Vector3.zero);
-        Transform tpsCameraRoot = GetOrCreateChild(playerTransform, "TPSCameraRoot", new Vector3(0f, 2.1f, -4f));
+        Transform humanVisualRoot = GetOrCreateDirectChild(playerTransform, "HumanVisualRoot", Vector3.zero);
+        Transform propVisualRoot = GetOrCreateDirectChild(playerTransform, "PropVisualRoot", Vector3.zero);
+        Transform tpsCameraRoot = GetOrCreateDirectChild(playerTransform, "TPSCameraRoot", new Vector3(0f, 2.1f, -4f));
         Transform spectatorRoot = GetOrCreateChild(playerTransform, "SpectatorCamera", new Vector3(0f, 4f, -6f));
 
         Transform capsule = playerTransform.Find("Capsule");
@@ -139,6 +230,11 @@ public static class PropHuntSetupTool
         cameraManager.spectatorCamera = spectatorCamera;
         cameraManager.tpsCameraRoot = tpsCameraRoot;
         cameraManager.spectatorCameraRoot = spectatorRoot;
+        cameraManager.cameraDistance = 4f;
+        cameraManager.cameraHeight = 2.5f;
+        cameraManager.cameraFollowSpeed = 10f;
+        cameraManager.wallPadding = 0.2f;
+        cameraManager.cameraCollisionMask = ~0;
 
         PropTransformSystem transformSystem = GetOrAddComponent<PropTransformSystem>(player);
         transformSystem.playerRole = PlayerRole.Hider;
@@ -284,6 +380,37 @@ public static class PropHuntSetupTool
         childObject.transform.localRotation = Quaternion.identity;
         childObject.transform.localScale = Vector3.one;
         return childObject.transform;
+    }
+
+    private static Transform GetOrCreateDirectChild(Transform parent, string name, Vector3 localPosition)
+    {
+        Transform child = parent.Find(name);
+        if (child == null)
+        {
+            foreach (Transform descendant in parent.GetComponentsInChildren<Transform>(true))
+            {
+                if (descendant != parent && descendant.name == name)
+                {
+                    child = descendant;
+                    break;
+                }
+            }
+        }
+
+        if (child == null)
+        {
+            return GetOrCreateChild(parent, name, localPosition);
+        }
+
+        if (child.parent != parent)
+        {
+            Undo.SetTransformParent(child, parent, $"Move {name} to PlayerCapsule");
+        }
+
+        child.localPosition = localPosition;
+        child.localRotation = Quaternion.identity;
+        child.localScale = Vector3.one;
+        return child;
     }
 
     private static Camera GetOrCreateCamera(Transform parent, string name, bool active, Vector3 localEulerAngles)

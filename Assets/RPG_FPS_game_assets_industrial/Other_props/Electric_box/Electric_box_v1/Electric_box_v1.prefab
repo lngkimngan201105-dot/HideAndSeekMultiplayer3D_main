@@ -120,7 +120,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Electric_box_v1
   displayName: Electric_box_v 1
-  visualPrefab: {fileID: 1000011804541950}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300002, guid: a06f542e25b97724c9866dff7870460c, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 7929421cb15ed0c4f873c3a43793a4e1, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

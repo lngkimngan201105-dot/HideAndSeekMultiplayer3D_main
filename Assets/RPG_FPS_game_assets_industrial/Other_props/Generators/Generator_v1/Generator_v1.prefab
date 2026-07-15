@@ -120,7 +120,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Generator_v1
   displayName: Generator_v 1
-  visualPrefab: {fileID: 1000010628347772}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300002, guid: c562f093a8293a149afd50618b46c18d, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 381346ab5f747d8468f1a25ceb5ee3ef, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

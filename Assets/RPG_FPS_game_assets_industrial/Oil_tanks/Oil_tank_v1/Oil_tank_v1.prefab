@@ -121,7 +121,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Oil_tank_v1
   displayName: Oil_tank_v 1
-  visualPrefab: {fileID: 1000014291894318}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300002, guid: f0722bb0f9795f24eb2e7c82f55738a6, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 8573c79e2e3e6c14c8dc545c942c8a60, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

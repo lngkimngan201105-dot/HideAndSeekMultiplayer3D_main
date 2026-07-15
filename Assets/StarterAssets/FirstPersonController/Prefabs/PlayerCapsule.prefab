@@ -906,6 +906,14 @@ MonoBehaviour:
   spectatorCamera: {fileID: 7246164826829553489}
   tpsCameraRoot: {fileID: 6816719287752293919}
   spectatorCameraRoot: {fileID: 7313671860837632171}
+  cameraDistance: 4
+  cameraHeight: 2.5
+  propLookHeight: 1
+  cameraFollowSpeed: 10
+  wallPadding: 0.2
+  cameraCollisionMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
 --- !u!114 &3096819855069291177
 MonoBehaviour:
   m_ObjectHideFlags: 0

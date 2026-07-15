@@ -121,7 +121,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Palet_v1_set
   displayName: Palet_v 1_set
-  visualPrefab: {fileID: 1000013871382564}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300006, guid: a0fa3deee73af2b49bf7f84e4421e5be, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 4a8145f028f3ea948a65028b51474a3f, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

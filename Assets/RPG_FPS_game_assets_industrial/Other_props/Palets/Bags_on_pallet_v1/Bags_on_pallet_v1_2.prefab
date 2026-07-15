@@ -120,7 +120,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Bags_on_pallet_v1_2
   displayName: Bags_on_pallet_v 1_2
-  visualPrefab: {fileID: 1000011569870456}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300000, guid: b23c07dd2dbafb34696c5bfa2677ddb4, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 9b20318cce963404c8c089075ad8cb87, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

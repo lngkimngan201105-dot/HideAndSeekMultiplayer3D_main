@@ -121,7 +121,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Road_block_v1
   displayName: Road_block_v 1
-  visualPrefab: {fileID: 1000012744991898}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300002, guid: 80030beb64998ca41b76b2ccf9866276, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 2d466dac55e3cd54ba41e1af2e5e0b6c, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

@@ -120,7 +120,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Cargo_container_v1_LD2close
   displayName: Cargo_container_v 1_LD 2close
-  visualPrefab: {fileID: 1000010817437606}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300022, guid: 856f086268c2c1b4f8f1d4b9bc614217, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 725065c3e256d624785aad798a8d0762, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1

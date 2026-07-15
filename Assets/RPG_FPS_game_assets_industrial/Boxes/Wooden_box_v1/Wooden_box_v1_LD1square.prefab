@@ -120,7 +120,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   propId: Wooden_box_v1_LD1square
   displayName: Wooden_box_v 1_LD 1square
-  visualPrefab: {fileID: 1000010811274378}
+  visualPrefab: {fileID: 0}
+  visualParts:
+  - mesh: {fileID: 4300012, guid: dcf39c3c160b51b49af399efea061f40, type: 3}
+    materials:
+    - {fileID: 2100000, guid: 1a087c65608607042accf116f4319d39, type: 2}
+    localPosition: {x: 0, y: 0, z: 0}
+    localEulerAngles: {x: -0, y: 0, z: 0}
+    localScale: {x: 1, y: 1, z: 1}
   visualOffset: {x: 0, y: 0, z: 0}
   visualRotationOffset: {x: 0, y: 0, z: 0}
   visualScale: 1
