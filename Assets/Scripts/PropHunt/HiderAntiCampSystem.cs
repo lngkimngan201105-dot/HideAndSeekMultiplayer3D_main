@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 public enum HiderAntiCampState
@@ -7,8 +8,36 @@ public enum HiderAntiCampState
     Revealed
 }
 
+public enum HiderAntiCampAlertType
+{
+    InitialReveal,
+    RepeatedReveal
+}
+
+public readonly struct HiderAntiCampAlertData
+{
+    public HiderAntiCampAlertData(
+        Vector3 hiderPosition,
+        float alertDuration,
+        HiderAntiCampAlertType alertType,
+        float timestamp)
+    {
+        HiderPosition = hiderPosition;
+        AlertDuration = alertDuration;
+        AlertType = alertType;
+        Timestamp = timestamp;
+    }
+
+    public Vector3 HiderPosition { get; }
+    public float AlertDuration { get; }
+    public HiderAntiCampAlertType AlertType { get; }
+    public float Timestamp { get; }
+}
+
 public class HiderAntiCampSystem : MonoBehaviour
 {
+    public const string DedicatedAudioObjectName = "HiderAntiCampAudioSource";
+
     [Header("References")]
     [SerializeField] private PropTransformSystem propTransformSystem;
     [SerializeField] private PropHuntRoundManager roundManager;
@@ -18,8 +47,6 @@ public class HiderAntiCampSystem : MonoBehaviour
     [SerializeField, Min(0.1f)] private float escapeCountdownDuration = 5f;
     [SerializeField, Min(0.1f)] private float escapeRadius = 3f;
     [SerializeField, Min(0.1f)] private float repeatSoundInterval = 10f;
-    [SerializeField] private AudioSource revealAudioSource;
-    [SerializeField] private AudioClip revealSound;
 
     public float CampTime { get; private set; }
     public float CountdownRemaining { get; private set; }
@@ -28,16 +55,26 @@ public class HiderAntiCampSystem : MonoBehaviour
         : 0;
     public bool IsCountdownActive => CurrentState == HiderAntiCampState.Warning;
     public bool IsRevealed => CurrentState == HiderAntiCampState.Revealed;
+    public bool IsSuppressedByZone => _suppressedByZone;
+    public bool IsEliminated => _eliminated;
+    public bool IsWarningActive => CurrentState == HiderAntiCampState.Warning;
+    public bool AntiCampTriggered => _antiCampTriggered;
+    public int AlertTriggerCount { get; private set; }
     public HiderAntiCampState CurrentState { get; private set; } = HiderAntiCampState.Safe;
 
-    private Vector2 _campOrigin;
+    public event Action<HiderAntiCampAlertData> AntiCampAlertTriggered;
+    public event Action AntiCampAlertCleared;
+
+    private Vector3 _campOrigin;
     private float _nextRevealAt;
     private bool _hasCampOrigin;
+    private bool _suppressedByZone;
+    private bool _eliminated;
+    private bool _antiCampTriggered;
 
     private void Awake()
     {
         ResolveReferences();
-        ConfigureAudioSource();
         ResetAntiCamp();
     }
 
@@ -68,15 +105,15 @@ public class HiderAntiCampSystem : MonoBehaviour
 
         if (!_hasCampOrigin)
         {
-            SetNewCampOrigin(GetHorizontalPosition());
+            SetNewCampOrigin(transform.position);
         }
 
-        Vector2 currentPosition = GetHorizontalPosition();
-        float horizontalDistance = Vector2.Distance(currentPosition, _campOrigin);
-        if (horizontalDistance >= escapeRadius)
+        Vector3 currentPosition = transform.position;
+        float campDistance = GetCampDisplacement(currentPosition);
+        if (campDistance >= escapeRadius)
         {
             SetNewCampOrigin(currentPosition);
-            StopRevealSound();
+            ClearAlertPresentation();
             return;
         }
 
@@ -100,15 +137,14 @@ public class HiderAntiCampSystem : MonoBehaviour
         CurrentState = HiderAntiCampState.Revealed;
         if (CampTime >= _nextRevealAt)
         {
-            PlayRevealSound();
+            TriggerAlert();
             _nextRevealAt = CampTime + repeatSoundInterval;
         }
     }
 
     public void Configure(
         PropTransformSystem transformSystem,
-        PropHuntRoundManager configuredRoundManager,
-        AudioSource configuredAudioSource)
+        PropHuntRoundManager configuredRoundManager)
     {
         if (roundManager != null && isActiveAndEnabled)
         {
@@ -117,8 +153,6 @@ public class HiderAntiCampSystem : MonoBehaviour
 
         propTransformSystem = transformSystem;
         roundManager = configuredRoundManager;
-        revealAudioSource = configuredAudioSource;
-        ConfigureAudioSource();
 
         if (roundManager != null && isActiveAndEnabled)
         {
@@ -130,19 +164,64 @@ public class HiderAntiCampSystem : MonoBehaviour
 
     public void ResetAntiCamp()
     {
+        _eliminated = false;
+        _suppressedByZone = false;
         _hasCampOrigin = false;
         CampTime = 0f;
         CountdownRemaining = 0f;
         _nextRevealAt = allowedCampTime + escapeCountdownDuration;
         CurrentState = HiderAntiCampState.Safe;
-        StopRevealSound();
+        _antiCampTriggered = false;
+        ClearAlertPresentation();
+    }
+
+    public void SetSuppressedByZone(bool suppressed)
+    {
+        if (_suppressedByZone == suppressed)
+        {
+            return;
+        }
+
+        _suppressedByZone = suppressed;
+        CountdownRemaining = 0f;
+        CurrentState = HiderAntiCampState.Safe;
+        _antiCampTriggered = false;
+        ClearAlertPresentation();
+    }
+
+    public void SetEliminatedState(bool eliminated)
+    {
+        _eliminated = eliminated;
+        _suppressedByZone = eliminated;
+        _hasCampOrigin = false;
+        CampTime = 0f;
+        CountdownRemaining = 0f;
+        CurrentState = HiderAntiCampState.Safe;
+        _antiCampTriggered = false;
+        ClearAlertPresentation();
+    }
+
+    public void ResumeFromZoneAt(Vector3 newCampOrigin)
+    {
+        if (_eliminated)
+        {
+            CountdownRemaining = 0f;
+            CurrentState = HiderAntiCampState.Safe;
+            _antiCampTriggered = false;
+            ClearAlertPresentation();
+            return;
+        }
+
+        _suppressedByZone = false;
+        SetNewCampOrigin(newCampOrigin);
+        ClearAlertPresentation();
     }
 
     private void HandleRoundStateChanged(PropHuntRoundState state)
     {
         if (state == PropHuntRoundState.Hunting)
         {
-            SetNewCampOrigin(GetHorizontalPosition());
+            SetNewCampOrigin(transform.position);
         }
         else
         {
@@ -150,19 +229,22 @@ public class HiderAntiCampSystem : MonoBehaviour
         }
     }
 
-    private void SetNewCampOrigin(Vector2 horizontalPosition)
+    private void SetNewCampOrigin(Vector3 position)
     {
-        _campOrigin = horizontalPosition;
+        _campOrigin = position;
         _hasCampOrigin = true;
         CampTime = 0f;
         CountdownRemaining = 0f;
         _nextRevealAt = allowedCampTime + escapeCountdownDuration;
         CurrentState = HiderAntiCampState.Safe;
+        _antiCampTriggered = false;
     }
 
     private bool ShouldTrackAntiCamp()
     {
         return propTransformSystem != null &&
+               !_eliminated &&
+               !_suppressedByZone &&
                propTransformSystem.playerRole == PlayerRole.Hider &&
                propTransformSystem.currentState == PlayerDisguiseState.Disguised &&
                !propTransformSystem.IsEliminated &&
@@ -170,10 +252,18 @@ public class HiderAntiCampSystem : MonoBehaviour
                roundManager.CurrentState == PropHuntRoundState.Hunting;
     }
 
-    private Vector2 GetHorizontalPosition()
+    private float GetCampDisplacement(Vector3 currentPosition)
     {
-        Vector3 position = transform.position;
-        return new Vector2(position.x, position.z);
+        Vector3 displacement = currentPosition - _campOrigin;
+        if (propTransformSystem != null && propTransformSystem.IsWallAttached)
+        {
+            return Vector3.ProjectOnPlane(
+                displacement,
+                propTransformSystem.WallNormal
+            ).magnitude;
+        }
+
+        return new Vector2(displacement.x, displacement.z).magnitude;
     }
 
     private void ResolveReferences()
@@ -188,69 +278,34 @@ public class HiderAntiCampSystem : MonoBehaviour
             roundManager = FindObjectOfType<PropHuntRoundManager>();
         }
 
-        if (revealAudioSource == null)
-        {
-            revealAudioSource = GetComponent<AudioSource>();
-        }
     }
 
-    private void ConfigureAudioSource()
+    private void TriggerAlert()
     {
-        if (revealAudioSource == null)
-        {
-            return;
-        }
-
-        revealAudioSource.playOnAwake = false;
-        revealAudioSource.loop = false;
-        revealAudioSource.spatialBlend = 1f;
-        revealAudioSource.minDistance = 4f;
-        revealAudioSource.maxDistance = 35f;
-        revealAudioSource.rolloffMode = AudioRolloffMode.Logarithmic;
+        HiderAntiCampAlertType alertType = _antiCampTriggered
+            ? HiderAntiCampAlertType.RepeatedReveal
+            : HiderAntiCampAlertType.InitialReveal;
+        _antiCampTriggered = true;
+        AlertTriggerCount++;
+        AntiCampAlertTriggered?.Invoke(new HiderAntiCampAlertData(
+            transform.position,
+            repeatSoundInterval,
+            alertType,
+            Time.unscaledTime));
     }
 
-    private void PlayRevealSound()
+    private void ClearAlertPresentation()
     {
-        if (revealAudioSource == null)
-        {
-            return;
-        }
-
-        AudioClip clip = revealSound != null ? revealSound : GetGeneratedRevealClip();
-        revealAudioSource.PlayOneShot(clip);
+        AntiCampAlertCleared?.Invoke();
     }
 
-    private void StopRevealSound()
+#if UNITY_EDITOR
+    public void TriggerAlertForValidation()
     {
-        if (revealAudioSource != null)
-        {
-            revealAudioSource.Stop();
-        }
+        CurrentState = HiderAntiCampState.Revealed;
+        CountdownRemaining = 0f;
+        TriggerAlert();
     }
+#endif
 
-    private static AudioClip _generatedRevealClip;
-
-    private static AudioClip GetGeneratedRevealClip()
-    {
-        if (_generatedRevealClip != null)
-        {
-            return _generatedRevealClip;
-        }
-
-        const int sampleRate = 44100;
-        const float duration = 0.55f;
-        int sampleCount = Mathf.CeilToInt(sampleRate * duration);
-        float[] samples = new float[sampleCount];
-        for (int i = 0; i < sampleCount; i++)
-        {
-            float time = i / (float)sampleRate;
-            float envelope = Mathf.Sin(Mathf.PI * i / sampleCount);
-            float pulse = 0.65f + 0.35f * Mathf.Sign(Mathf.Sin(time * 24f));
-            samples[i] = Mathf.Sin(2f * Mathf.PI * 740f * time) * envelope * pulse * 0.32f;
-        }
-
-        _generatedRevealClip = AudioClip.Create("GeneratedAntiCampReveal", sampleCount, 1, sampleRate, false);
-        _generatedRevealClip.SetData(samples, 0);
-        return _generatedRevealClip;
-    }
 }

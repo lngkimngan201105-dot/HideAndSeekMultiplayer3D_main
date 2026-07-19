@@ -21,14 +21,13 @@ public enum PropHuntRoundWinner
 public class PropHuntRoundManager : MonoBehaviour
 {
     [Header("Round timing")]
-    [SerializeField, Min(0f)] private float preparationDuration = 40f;
-    [SerializeField, Min(0f)] private float huntingDuration = 240f;
+    [SerializeField, Min(0f)] private float preparationDuration = 30f;
+    [SerializeField, Min(0f)] private float huntingDuration = 180f;
     [SerializeField] private bool autoStartRoundInLocalMode = true;
 
     [Header("Local preview counts")]
-    [SerializeField] private bool usePreviewCounts = true;
+    [SerializeField] private bool usePreviewCounts = false;
     [SerializeField, Min(0)] private int previewSeekerCount = 2;
-    [SerializeField, Min(0)] private int previewAliveHiderCount = 5;
 
     [Header("Participants")]
     [SerializeField] private List<PropTransformSystem> players = new List<PropTransformSystem>();
@@ -43,7 +42,14 @@ public class PropHuntRoundManager : MonoBehaviour
     public float HuntingDuration => huntingDuration;
 
     public event Action RoundDataChanged;
+    public event Action RoundStarted;
     public event Action<PropHuntRoundState> RoundStateChanged;
+
+    public void ConfigureDurations(float configuredPreparationDuration, float configuredHuntingDuration)
+    {
+        preparationDuration = Mathf.Max(0f, configuredPreparationDuration);
+        huntingDuration = Mathf.Max(0f, configuredHuntingDuration);
+    }
 
     private void Awake()
     {
@@ -130,20 +136,13 @@ public class PropHuntRoundManager : MonoBehaviour
         SetState(PropHuntRoundState.Preparation);
         SetSeekerMovementAllowed(false);
         ResetHiderAbilities();
+        RoundStarted?.Invoke();
         RefreshPlayerCounts();
         RoundDataChanged?.Invoke();
     }
 
     public void RestartRound()
     {
-        foreach (PropTransformSystem player in players)
-        {
-            if (player != null)
-            {
-                player.SetEliminated(false);
-            }
-        }
-
         StartRound();
     }
 
@@ -171,7 +170,6 @@ public class PropHuntRoundManager : MonoBehaviour
     {
         int actualHiders = 0;
         int actualSeekers = 0;
-        bool hasHiderParticipant = false;
 
         for (int i = players.Count - 1; i >= 0; i--)
         {
@@ -184,8 +182,8 @@ public class PropHuntRoundManager : MonoBehaviour
 
             if (player.playerRole == PlayerRole.Hider)
             {
-                hasHiderParticipant = true;
-                if (!player.IsEliminated)
+                HiderHealth health = player.GetComponent<HiderHealth>();
+                if (health == null || health.IsAlive)
                 {
                     actualHiders++;
                 }
@@ -196,13 +194,8 @@ public class PropHuntRoundManager : MonoBehaviour
             }
         }
 
-        int displayedHiders = usePreviewCounts ? previewAliveHiderCount : actualHiders;
+        int displayedHiders = actualHiders;
         int displayedSeekers = usePreviewCounts ? previewSeekerCount : actualSeekers;
-
-        if (CurrentState == PropHuntRoundState.Hunting && hasHiderParticipant && actualHiders == 0)
-        {
-            EndRound();
-        }
 
         if (AliveHiderCount == displayedHiders && SeekerCount == displayedSeekers)
         {
@@ -248,7 +241,9 @@ public class PropHuntRoundManager : MonoBehaviour
         int count = 0;
         foreach (PropTransformSystem player in players)
         {
-            if (player != null && player.playerRole == PlayerRole.Hider && !player.IsEliminated)
+            HiderHealth health = player != null ? player.GetComponent<HiderHealth>() : null;
+            if (player != null && player.playerRole == PlayerRole.Hider &&
+                (health == null || health.IsAlive))
             {
                 count++;
             }

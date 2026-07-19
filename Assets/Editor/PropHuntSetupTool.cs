@@ -64,6 +64,12 @@ public static class PropHuntSetupTool
             }
 
             propTarget.propId = propName;
+            if (propTarget.propId.StartsWith("Electric_box_v", StringComparison.OrdinalIgnoreCase) ||
+                propTarget.propId.Equals("Conditioner_v1", StringComparison.OrdinalIgnoreCase))
+            {
+                propTarget.SetGameplayEnabled(true);
+            }
+
             propTarget.displayName = ObjectNames.NicifyVariableName(propName);
             propTarget.visualPrefab = null;
             propTarget.visualOffset = Vector3.zero;
@@ -128,6 +134,8 @@ public static class PropHuntSetupTool
             PrefabUtility.UnloadPrefabContents(prefabRoot);
             Debug.Log($"PropHuntSetupTool: marked '{propName}' as PropTarget.");
         }
+
+        Debug.Log("PropHuntSetupTool: all valid wall-mounted prop assets remain gameplay-enabled.");
     }
 
     private static void ConfigurePlayerPrefab()
@@ -186,6 +194,7 @@ public static class PropHuntSetupTool
 
             propTarget.visualPrefab = null;
             propTarget.visualParts = prefabPropTarget.visualParts;
+            propTarget.SetGameplayEnabled(prefabPropTarget.GameplayEnabled);
             PrefabUtility.RecordPrefabInstancePropertyModifications(propTarget);
             EditorUtility.SetDirty(propTarget);
         }

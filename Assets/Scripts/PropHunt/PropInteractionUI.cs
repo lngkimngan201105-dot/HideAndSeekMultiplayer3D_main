@@ -60,22 +60,9 @@ public class PropInteractionUI : MonoBehaviour
             return;
         }
 
-        if (propTransformSystem.currentState != PlayerDisguiseState.Disguised)
-        {
-            SetPrompt(string.Empty, false, 0f);
-            return;
-        }
-
-        float elapsed = Time.unscaledTime - _disguisedPromptStartTime;
-        float alpha = 1f;
-        if (elapsed > disguisedPromptDuration)
-        {
-            alpha = 1f - Mathf.Clamp01(
-                (elapsed - disguisedPromptDuration) / Mathf.Max(0.01f, disguisedPromptFadeDuration)
-            );
-        }
-
-        SetPrompt(disguisedPrompt, alpha > 0f, alpha);
+        // Disguised controls are shown only by the lower-left contextual HUD.
+        // Keeping this legacy center prompt hidden also prevents showing R while wall-attached.
+        SetPrompt(string.Empty, false, 0f);
     }
 
     private void SetPrompt(string message, bool visible, float alpha)
