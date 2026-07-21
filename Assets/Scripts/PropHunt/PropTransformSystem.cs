@@ -1,9 +1,25 @@
+using System;
 using StarterAssets;
 using UnityEngine;
 using UnityEngine.AI;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
+
+public enum HiderControlState
+{
+    Human,
+    DisguisedGrounded,
+    DisguisedWallAttached,
+    GhostCamera,
+    Spectator
+}
 
 public class PropTransformSystem : MonoBehaviour
 {
+    public event Action VisualChanged;
+    public event Action<bool> EliminationChanged;
+
     [Header("Role")]
     public PlayerRole playerRole = PlayerRole.Hider;
 
@@ -22,6 +38,19 @@ public class PropTransformSystem : MonoBehaviour
     [Header("Round")]
     public PropHuntRoundManager roundManager;
 
+    [Header("Disguised Wall Traversal")]
+    [SerializeField] private LayerMask attachSurfaceMask = Physics.DefaultRaycastLayers;
+    [SerializeField, Range(0f, 1f)] private float maximumWallUpDot = 0.35f;
+    [SerializeField] private float wallAttachMaxDistance = 1.2f;
+    [SerializeField] private float wallSurfaceGap = 0.05f;
+    [SerializeField, Range(0.1f, 1f)] private float wallMoveSpeedMultiplier = 0.5f;
+    [SerializeField] private float propRotationSpeed = 90f;
+    [SerializeField] private float wallJumpOutSpeed = 2.5f;
+    [SerializeField] private float wallJumpUpSpeed = 3.5f;
+    [SerializeField] private float wallSnapSpeed = 3f;
+    [SerializeField] private float wallNormalSmoothingSpeed = 12f;
+    [SerializeField] private HiderPlayableAreaBounds playableAreaBounds;
+
     public string currentPropId;
     public PlayerDisguiseState currentState = PlayerDisguiseState.Human;
 
@@ -33,10 +62,49 @@ public class PropTransformSystem : MonoBehaviour
     private Material _debugMaterial;
     private Vector3 _disguiseStartPlayerPosition;
     private float _nextMovementLogTime;
+    private Vector3 _lockedHiderPosition;
+    private Quaternion _lockedHiderRotation;
+    private PlayerCameraMode _cameraModeBeforeGhost = PlayerCameraMode.PropTPS;
+    private bool _firstPersonControllerWasEnabled;
+    private bool _controllerWasAlreadyLocked;
+    private CursorLockMode _cursorLockModeBeforeGhost;
+    private bool _cursorVisibleBeforeGhost;
+    private Quaternion _propVisualRotationOffset = Quaternion.identity;
+    private Vector3 _wallHitPoint;
+    private float _wallDistance;
+    private Quaternion _baseWallAlignmentRotation = Quaternion.identity;
+    private float _wallUserRotationDegrees;
+    private Vector3 _detectedBackLocalDirection = Vector3.back;
+    private float _detectedBackConfidence;
+    private Bounds _localWallVisualBounds;
+    private bool _hasLocalWallVisualBounds;
+    private Vector3 _lastValidWallRight;
+    private Vector3 _lastValidWallUp;
+    private readonly System.Collections.Generic.HashSet<string> _backAnalysisWarnings =
+        new System.Collections.Generic.HashSet<string>();
+    private bool _gameplayInputLocked;
 
     public Transform CurrentPropVisualTransform =>
         _currentPropVisual != null ? _currentPropVisual.transform : null;
+    public Transform CurrentVisualRoot => IsDisguised ? propVisualRoot : humanVisualRoot;
     public bool IsEliminated { get; private set; }
+    public bool IsGhostCameraActive { get; private set; }
+    public bool IsChangingModel { get; private set; }
+    public bool IsGameplayInputLocked => _gameplayInputLocked;
+    public bool IsDisguised => currentState == PlayerDisguiseState.Disguised;
+    public bool IsWallAttached { get; private set; }
+    public Vector3 WallNormal { get; private set; }
+    public Collider AttachedWallCollider { get; private set; }
+    public Vector3 WallHitPoint => _wallHitPoint;
+    public HiderControlState CurrentControlState => IsGhostCameraActive
+        ? HiderControlState.GhostCamera
+        : currentState == PlayerDisguiseState.Spectator
+            ? HiderControlState.Spectator
+            : currentState == PlayerDisguiseState.Human
+                ? HiderControlState.Human
+                : IsWallAttached
+                    ? HiderControlState.DisguisedWallAttached
+                    : HiderControlState.DisguisedGrounded;
 
     private void Awake()
     {
@@ -69,9 +137,36 @@ public class PropTransformSystem : MonoBehaviour
         EnsureTpsCameraOutsideHumanVisualRoot();
     }
 
+    private void OnEnable()
+    {
+        if (roundManager != null)
+        {
+            roundManager.RoundStateChanged += HandleRoundStateChanged;
+        }
+    }
+
+    private void OnDisable()
+    {
+        if (roundManager != null)
+        {
+            roundManager.RoundStateChanged -= HandleRoundStateChanged;
+        }
+
+        ForceExitGhostCamera();
+        ForceDetachFromWall();
+    }
+
     private void Start()
     {
-        BecomeHuman(false);
+        if (playableAreaBounds == null)
+        {
+            playableAreaBounds = HiderPlayableAreaBounds.ResolveOrCreate(transform);
+        }
+
+        if (!IsEliminated)
+        {
+            BecomeHuman(false);
+        }
     }
 
     private void Update()
@@ -81,9 +176,59 @@ public class PropTransformSystem : MonoBehaviour
             return;
         }
 
+        if (_gameplayInputLocked || IsEliminated)
+        {
+            ClearGameplayInputForGhostCamera();
+            return;
+        }
+
+        if (IsGhostCameraActive)
+        {
+            if (!CanRemainInGhostCamera())
+            {
+                ForceExitGhostCamera();
+                return;
+            }
+
+            if (_input.spectatorToggle)
+            {
+                _input.spectatorToggle = false;
+                ForceExitGhostCamera();
+                return;
+            }
+
+            KeepHiderLockedInPlace();
+            ClearGameplayInputForGhostCamera();
+            return;
+        }
+
+        if (_input.spectatorToggle)
+        {
+            _input.spectatorToggle = false;
+            if (CanAttemptEnterGhostCamera())
+            {
+                TryEnterGhostCamera();
+                return;
+            }
+
+            ToggleSpectator();
+        }
+
+        if (IsDisguised)
+        {
+            HandlePropRotationInput();
+        }
+
+        if (IsWallAttached && _input.jump)
+        {
+            _input.jump = false;
+            DetachFromWall(true);
+            return;
+        }
+
         if (_input.cancelDisguise)
         {
-            if (!IsEliminated && currentState != PlayerDisguiseState.Human)
+            if (!IsWallAttached && !IsEliminated && currentState != PlayerDisguiseState.Human)
             {
                 BecomeHuman(true);
             }
@@ -91,15 +236,22 @@ public class PropTransformSystem : MonoBehaviour
             _input.cancelDisguise = false;
         }
 
-        if (_input.spectatorToggle)
-        {
-            ToggleSpectator();
-            _input.spectatorToggle = false;
-        }
-
         if (_input.interact)
         {
-            if (currentState == PlayerDisguiseState.Human && TryGetLookedAtProp(out PropTarget prop, out GameObject sourceVisual))
+            if (IsWallAttached)
+            {
+                DetachFromWall(false);
+            }
+            else if (currentState == PlayerDisguiseState.Disguised)
+            {
+                if (TryAttachToWall())
+                {
+                    _input.interact = false;
+                    return;
+                }
+            }
+            else if (currentState == PlayerDisguiseState.Human &&
+                     TryGetLookedAtProp(out PropTarget prop, out GameObject sourceVisual))
             {
                 BecomeProp(prop, sourceVisual);
             }
@@ -112,9 +264,9 @@ public class PropTransformSystem : MonoBehaviour
             LogLookedAtProp();
         }
 
-        if (currentState == PlayerDisguiseState.Disguised)
+        if (IsWallAttached)
         {
-            LogDisguisedMovement();
+            UpdateWallTraversal();
         }
     }
 
@@ -125,6 +277,32 @@ public class PropTransformSystem : MonoBehaviour
 
     public void SetEliminated(bool eliminated)
     {
+        HiderHealth health = GetComponent<HiderHealth>();
+        if (health != null && health.IsEliminated != eliminated)
+        {
+            if (eliminated)
+            {
+                health.SetHealth(0);
+            }
+            else
+            {
+                health.ResetForRound();
+            }
+
+            return;
+        }
+
+        ApplyHealthEliminationState(eliminated);
+    }
+
+    public void ApplyHealthEliminationState(bool eliminated, bool enterSpectatorState = true)
+    {
+        if (eliminated)
+        {
+            ForceExitGhostCamera();
+            ForceDetachForElimination();
+        }
+
         if (IsEliminated == eliminated)
         {
             return;
@@ -136,14 +314,19 @@ public class PropTransformSystem : MonoBehaviour
             ClearPropVisual();
             SetPropVisualActive(false);
             SetHumanVisualActive(false);
-            currentState = PlayerDisguiseState.Spectator;
             SetFirstPersonControllerEnabled(false);
-            SetCamera(PlayerCameraMode.Spectator);
+            if (enterSpectatorState)
+            {
+                currentState = PlayerDisguiseState.Spectator;
+                SetCamera(PlayerCameraMode.Spectator);
+            }
         }
-        else if (currentState == PlayerDisguiseState.Spectator)
+        else
         {
             BecomeHuman(false);
         }
+
+        EliminationChanged?.Invoke(eliminated);
 
         if (roundManager != null)
         {
@@ -151,11 +334,76 @@ public class PropTransformSystem : MonoBehaviour
         }
     }
 
+    public void SetGameplayInputLocked(bool locked)
+    {
+        _gameplayInputLocked = locked;
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetControlLocked(locked);
+        }
+
+        if (locked)
+        {
+            ClearGameplayInputForGhostCamera();
+        }
+    }
+
+    public void ResetToHumanForRoleSelection()
+    {
+        if (playerRole != PlayerRole.Hider || IsEliminated)
+        {
+            return;
+        }
+
+        ForceExitGhostCamera();
+        ForceDetachForElimination();
+        BecomeHuman(false);
+    }
+
     public bool ApplyPropDefinition(PropTarget propDefinition, bool keepCurrentCameraMode = true)
     {
+        if (IsChangingModel)
+        {
+            return false;
+        }
+
+        bool applied;
+        IsChangingModel = true;
+        try
+        {
+            applied = ApplyPropDefinitionInternal(propDefinition, keepCurrentCameraMode);
+        }
+        finally
+        {
+            IsChangingModel = false;
+        }
+
+        if (applied)
+        {
+            VisualChanged?.Invoke();
+        }
+
+        return applied;
+    }
+
+    public bool TryBecomePropForTesting(PropTarget propDefinition)
+    {
+        if (propDefinition == null || !propDefinition.GameplayEnabled || IsEliminated || IsChangingModel)
+        {
+            return false;
+        }
+
+        BecomeProp(propDefinition, null);
+        return IsDisguised && currentPropId == propDefinition.propId && CurrentPropVisualTransform != null;
+    }
+
+    private bool ApplyPropDefinitionInternal(PropTarget propDefinition, bool keepCurrentCameraMode)
+    {
         if (propDefinition == null ||
+            !propDefinition.GameplayEnabled ||
             currentState != PlayerDisguiseState.Disguised ||
             IsEliminated ||
+            IsGhostCameraActive ||
             propVisualRoot == null ||
             !IsValidRandomPropDefinition(propDefinition))
         {
@@ -164,6 +412,7 @@ public class PropTransformSystem : MonoBehaviour
 
         Vector3 playerPosition = transform.position;
         GameObject previousVisual = _currentPropVisual;
+        Quaternion savedVisualRotation = propVisualRoot.rotation;
 
         GameObject candidatePivot = new GameObject("DisguiseVisualPivot");
         Transform pivot = candidatePivot.transform;
@@ -187,11 +436,41 @@ public class PropTransformSystem : MonoBehaviour
         if (!ValidateOriginalPropModelBounds(model) || !CenterModelOnPlayer(model))
         {
             Destroy(candidatePivot);
-            transform.position = playerPosition;
             return false;
         }
 
-        transform.position = playerPosition;
+        Vector3 safeWallPosition = playerPosition;
+        float safeWallDistance = _wallDistance;
+        PropWallGeometry candidateGeometry = default;
+        Quaternion candidateBaseAlignment = _baseWallAlignmentRotation;
+        Quaternion candidateVisualRotation = savedVisualRotation;
+        if (IsWallAttached &&
+            (!TryPrepareWallVisual(
+                 candidatePivot.transform,
+                 propDefinition.propId,
+                 _baseWallAlignmentRotation,
+                 WallNormal,
+                 out candidateGeometry,
+                 out candidateBaseAlignment,
+                 out candidateVisualRotation) ||
+             !TryCalculateWallPlacement(
+                 playerPosition,
+                 candidateVisualRotation,
+                 candidateGeometry.LocalBounds,
+                 AttachedWallCollider,
+                 WallNormal,
+                 _wallHitPoint,
+                 out safeWallPosition,
+                 out safeWallDistance)))
+        {
+            Destroy(candidatePivot);
+            propVisualRoot.rotation = savedVisualRotation;
+            Debug.Log(
+                "HiderWallTraversal: Random prop rejected because wall placement was unsafe."
+            );
+            return false;
+        }
+
         _currentPropVisual = candidatePivot;
         currentPropId = propDefinition.propId;
         AddBlockingColliderToPropVisual(candidatePivot);
@@ -199,6 +478,25 @@ public class PropTransformSystem : MonoBehaviour
         if (previousVisual != null)
         {
             Destroy(previousVisual);
+        }
+
+        if (IsWallAttached)
+        {
+            _baseWallAlignmentRotation = candidateBaseAlignment;
+            _detectedBackLocalDirection = candidateGeometry.DetectedBackLocalDirection;
+            _detectedBackConfidence = candidateGeometry.Confidence;
+            _localWallVisualBounds = candidateGeometry.LocalBounds;
+            _hasLocalWallVisualBounds = true;
+            propVisualRoot.rotation = candidateVisualRotation;
+            _propVisualRotationOffset = candidateVisualRotation;
+            _wallDistance = safeWallDistance;
+            _characterController.Move(safeWallPosition - transform.position);
+            Physics.SyncTransforms();
+        }
+        else
+        {
+            propVisualRoot.rotation = savedVisualRotation;
+            _propVisualRotationOffset = savedVisualRotation;
         }
 
         if (cameraModeManager != null)
@@ -216,7 +514,9 @@ public class PropTransformSystem : MonoBehaviour
 
     private static bool IsValidRandomPropDefinition(PropTarget definition)
     {
-        if (definition.visualParts == null || definition.visualParts.Length == 0)
+        if (!definition.GameplayEnabled ||
+            definition.visualParts == null ||
+            definition.visualParts.Length == 0)
         {
             return false;
         }
@@ -250,7 +550,27 @@ public class PropTransformSystem : MonoBehaviour
 
     private void BecomeProp(PropTarget prop, GameObject sceneSource)
     {
-        if (prop == null)
+        if (IsChangingModel)
+        {
+            return;
+        }
+
+        IsChangingModel = true;
+        try
+        {
+            BecomePropInternal(prop, sceneSource);
+        }
+        finally
+        {
+            IsChangingModel = false;
+        }
+
+        VisualChanged?.Invoke();
+    }
+
+    private void BecomePropInternal(PropTarget prop, GameObject sceneSource)
+    {
+        if (prop == null || !prop.GameplayEnabled)
         {
             return;
         }
@@ -329,8 +649,19 @@ public class PropTransformSystem : MonoBehaviour
 
         currentPropId = prop.propId;
         currentState = PlayerDisguiseState.Disguised;
+        IsWallAttached = false;
+        WallNormal = Vector3.zero;
+        AttachedWallCollider = null;
+        _propVisualRotationOffset = propVisualRoot.rotation;
         SetMovementComponentsEnabled(true);
         EnsureDisguisedMovementSettings();
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetDisguisedCameraRelativeMovement(
+                cameraModeManager != null ? cameraModeManager.tpsCamera : null,
+                true
+            );
+        }
         _disguiseStartPlayerPosition = transform.position;
         _nextMovementLogTime = Time.time;
 
@@ -494,10 +825,19 @@ public class PropTransformSystem : MonoBehaviour
 
     private void BecomeHuman(bool log)
     {
+        ForceExitGhostCamera();
+        ForceDetachFromWall();
+
         if (cameraModeManager != null)
         {
             cameraModeManager.ClearPropTarget();
         }
+
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetDisguisedCameraRelativeMovement(null, false);
+        }
+        ResetWallMovementBasis();
 
         ClearPropVisual();
         SetPropVisualActive(false);
@@ -507,6 +847,7 @@ public class PropTransformSystem : MonoBehaviour
         currentState = PlayerDisguiseState.Human;
         SetFirstPersonControllerEnabled(true);
         SetCamera(PlayerCameraMode.HumanFPS);
+        VisualChanged?.Invoke();
 
         if (log)
         {
@@ -545,6 +886,1207 @@ public class PropTransformSystem : MonoBehaviour
         Debug.Log("PropTransformSystem: switched from prop TPS camera to spectator camera.");
     }
 
+    public bool CanAttachToWall()
+    {
+        return IsDisguised &&
+               !IsWallAttached &&
+               !IsGhostCameraActive &&
+               (_firstPersonController == null || _firstPersonController.enabled) &&
+               TryFindAttachableWall(out _);
+    }
+
+    public bool TryAttachToWall()
+    {
+        if (!IsDisguised ||
+            IsWallAttached ||
+            IsGhostCameraActive ||
+            !TryFindAttachableWall(out RaycastHit wallHit) ||
+            propVisualRoot == null ||
+            _characterController == null ||
+            !_characterController.enabled ||
+            _input == null ||
+            (_firstPersonController != null && !_firstPersonController.enabled))
+        {
+            return false;
+        }
+
+        Quaternion previousVisualRotation = propVisualRoot.rotation;
+        float previousUserRotation = _wallUserRotationDegrees;
+        _wallUserRotationDegrees = 0f;
+        Vector3 attachNormal = GetStableOutwardWallNormal(
+            wallHit.normal,
+            wallHit.point,
+            Vector3.zero,
+            transform.position
+        );
+        Transform analysisRoot = _currentPropVisual != null
+            ? _currentPropVisual.transform
+            : propVisualRoot;
+        if (!TryPrepareWallVisual(
+                analysisRoot,
+                currentPropId,
+                previousVisualRotation,
+                attachNormal,
+                out PropWallGeometry geometry,
+                out Quaternion baseAlignment,
+                out Quaternion desiredVisualRotation) ||
+            !TryCalculateWallPlacement(
+                transform.position,
+                desiredVisualRotation,
+                geometry.LocalBounds,
+                wallHit.collider,
+                attachNormal,
+                wallHit.point,
+                out Vector3 safePlayerPosition,
+                out float safeDistance))
+        {
+            _wallUserRotationDegrees = previousUserRotation;
+            propVisualRoot.rotation = previousVisualRotation;
+            return false;
+        }
+
+        Vector3 originalPlayerPosition = transform.position;
+        _characterController.Move(safePlayerPosition - transform.position);
+        Physics.SyncTransforms();
+        if (!CanUseWallPose(
+                transform.position,
+                desiredVisualRotation,
+                geometry.LocalBounds,
+                wallHit.collider,
+                wallHit.point,
+                attachNormal))
+        {
+            _characterController.Move(originalPlayerPosition - transform.position);
+            _wallUserRotationDegrees = previousUserRotation;
+            propVisualRoot.rotation = previousVisualRotation;
+            Debug.Log("Wall Attach: Candidate pose rejected because of penetration.");
+            return false;
+        }
+
+        AttachedWallCollider = wallHit.collider;
+        WallNormal = attachNormal;
+        _wallHitPoint = wallHit.point;
+        _wallDistance = safeDistance;
+        _baseWallAlignmentRotation = baseAlignment;
+        _detectedBackLocalDirection = geometry.DetectedBackLocalDirection;
+        _detectedBackConfidence = geometry.Confidence;
+        _localWallVisualBounds = geometry.LocalBounds;
+        _hasLocalWallVisualBounds = true;
+        IsWallAttached = true;
+        ResetWallMovementBasis();
+        TryGetWallMovementBasis(WallNormal, out _, out _);
+        propVisualRoot.rotation = desiredVisualRotation;
+        _propVisualRotationOffset = desiredVisualRotation;
+
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetControlLocked(true);
+        }
+
+        _input.move = Vector2.zero;
+        _input.jump = false;
+        _input.sprint = false;
+        Debug.Log(
+            $"Wall Attach: Surface accepted: {AttachedWallCollider.name}\n" +
+            $"Layer={LayerMask.LayerToName(AttachedWallCollider.gameObject.layer)}\n" +
+            $"Collider={AttachedWallCollider.GetType().Name}\n" +
+            $"Normal={WallNormal}."
+        );
+        if (cameraModeManager != null)
+        {
+            cameraModeManager.RefreshCurrentPropCamera();
+            cameraModeManager.ForceCameraToSafePosition();
+        }
+
+        return true;
+    }
+
+    public void DetachFromWall(bool applyJumpImpulse = false)
+    {
+        DetachFromWallInternal(applyJumpImpulse, applyJumpImpulse ? "Jump" : "Manual");
+    }
+
+    public void ForceDetachFromWall()
+    {
+        DetachFromWallInternal(false, "Reset");
+    }
+
+    public void ForceDetachForElimination()
+    {
+        DetachFromWallInternal(false, "Elimination");
+    }
+
+    private void DetachFromWallInternal(bool applyJumpImpulse, string reason)
+    {
+        if (!IsWallAttached)
+        {
+            return;
+        }
+
+        Vector3 detachNormal = WallNormal;
+        if (propVisualRoot != null)
+        {
+            _propVisualRotationOffset = propVisualRoot.rotation;
+        }
+
+        IsWallAttached = false;
+        WallNormal = Vector3.zero;
+        AttachedWallCollider = null;
+        _wallHitPoint = Vector3.zero;
+        _wallDistance = 0f;
+        _wallUserRotationDegrees = 0f;
+        _baseWallAlignmentRotation = Quaternion.identity;
+        _detectedBackLocalDirection = Vector3.back;
+        _detectedBackConfidence = 0f;
+        _hasLocalWallVisualBounds = false;
+        ResetWallMovementBasis();
+
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetControlLocked(false);
+        }
+
+        if (_characterController != null && _characterController.enabled)
+        {
+            _characterController.Move(detachNormal * 0.08f);
+        }
+
+        if (applyJumpImpulse && _firstPersonController != null)
+        {
+            _firstPersonController.ApplyExternalVelocity(
+                detachNormal * wallJumpOutSpeed + Vector3.up * wallJumpUpSpeed
+            );
+        }
+
+        if (_input != null)
+        {
+            _input.move = Vector2.zero;
+            _input.jump = false;
+            _input.sprint = false;
+        }
+
+        if (cameraModeManager != null)
+        {
+            cameraModeManager.RefreshCurrentPropCamera();
+            cameraModeManager.ForceCameraToSafePosition();
+        }
+
+        Debug.Log($"HiderWallTraversal: Detached.\nReason={reason}.");
+    }
+
+    private void HandlePropRotationInput()
+    {
+        if (propVisualRoot == null || IsChangingModel)
+        {
+            return;
+        }
+
+        float rotationInput = ReadPropRotationInput();
+        if (Mathf.Approximately(rotationInput, 0f))
+        {
+            return;
+        }
+
+        if (IsWallAttached)
+        {
+            if (!_hasLocalWallVisualBounds)
+            {
+                return;
+            }
+
+            float candidateUserRotation = _wallUserRotationDegrees +
+                                          rotationInput * propRotationSpeed * Time.deltaTime;
+            Quaternion candidateRotation =
+                Quaternion.AngleAxis(candidateUserRotation, WallNormal) *
+                _baseWallAlignmentRotation;
+            if (!TryCalculateWallPlacement(
+                    transform.position,
+                    candidateRotation,
+                    _localWallVisualBounds,
+                    AttachedWallCollider,
+                    WallNormal,
+                    _wallHitPoint,
+                    out Vector3 safePosition,
+                    out float safeDistance))
+            {
+                return;
+            }
+
+            _wallUserRotationDegrees = candidateUserRotation;
+            _wallDistance = safeDistance;
+            _characterController.Move(safePosition - transform.position);
+            propVisualRoot.rotation = candidateRotation;
+            Physics.SyncTransforms();
+        }
+        else
+        {
+            propVisualRoot.Rotate(
+                Vector3.up,
+                rotationInput * propRotationSpeed * Time.deltaTime,
+                Space.World
+            );
+        }
+
+        _propVisualRotationOffset = propVisualRoot.rotation;
+    }
+
+    private void UpdateWallTraversal()
+    {
+        if (!IsWallAttached ||
+            AttachedWallCollider == null ||
+            !AttachedWallCollider.enabled ||
+            _characterController == null ||
+            !_characterController.enabled ||
+            !_hasLocalWallVisualBounds ||
+            (_firstPersonController != null && !_firstPersonController.enabled))
+        {
+            DetachFromWallInternal(false, "InvalidSurface");
+            return;
+        }
+
+        if (!TryFindSupportingWall(
+                transform.position,
+                AttachedWallCollider,
+                _wallHitPoint,
+                WallNormal,
+                out RaycastHit currentWallHit))
+        {
+            DetachFromWallInternal(false, "InvalidSurface");
+            return;
+        }
+
+        Vector2 moveInput = Vector2.ClampMagnitude(_input.move, 1f);
+        if (!TryGetWallMovementBasis(WallNormal, out Vector3 wallUp, out Vector3 wallRight))
+        {
+            MaintainWallAttachment(currentWallHit);
+            return;
+        }
+
+        Vector3 wallMovement = wallRight * moveInput.x + wallUp * moveInput.y;
+
+        if (wallMovement.sqrMagnitude > 0.0001f)
+        {
+            float normalMoveSpeed = _firstPersonController != null
+                ? _firstPersonController.MoveSpeed
+                : 4f;
+            Vector3 movementDelta =
+                wallMovement.normalized *
+                (normalMoveSpeed * wallMoveSpeedMultiplier * Time.deltaTime);
+            Vector3 desiredPosition = transform.position + movementDelta;
+
+            if (IsInsidePlayableArea(desiredPosition) &&
+                TryFindSupportingWall(
+                    desiredPosition,
+                    AttachedWallCollider,
+                    _wallHitPoint,
+                    WallNormal,
+                    out RaycastHit desiredWallHit))
+            {
+                Vector3 desiredOutwardNormal = GetStableOutwardWallNormal(
+                    desiredWallHit.normal,
+                    desiredWallHit.point,
+                    WallNormal,
+                    desiredPosition
+                );
+                Vector3 candidateNormal = Vector3.Slerp(
+                    WallNormal,
+                    desiredOutwardNormal,
+                    Mathf.Clamp01(wallNormalSmoothingSpeed * Time.deltaTime)
+                ).normalized;
+                Quaternion candidateBaseAlignment = AlignBackDirectionToWall(
+                    _baseWallAlignmentRotation,
+                    _detectedBackLocalDirection,
+                    candidateNormal
+                );
+                Quaternion candidateVisualRotation =
+                    Quaternion.AngleAxis(_wallUserRotationDegrees, candidateNormal) *
+                    candidateBaseAlignment;
+
+                if (TryCalculateWallPlacement(
+                        desiredPosition,
+                        candidateVisualRotation,
+                        _localWallVisualBounds,
+                        desiredWallHit.collider,
+                        candidateNormal,
+                        desiredWallHit.point,
+                        out Vector3 safePosition,
+                        out float safeDistance))
+                {
+                    _characterController.Move(safePosition - transform.position);
+                    AttachedWallCollider = desiredWallHit.collider;
+                    WallNormal = candidateNormal;
+                    _wallHitPoint = desiredWallHit.point;
+                    _wallDistance = safeDistance;
+                    _baseWallAlignmentRotation = candidateBaseAlignment;
+                    propVisualRoot.rotation = candidateVisualRotation;
+                    _propVisualRotationOffset = candidateVisualRotation;
+                    Physics.SyncTransforms();
+                    return;
+                }
+            }
+        }
+
+        MaintainWallAttachment(currentWallHit);
+    }
+
+    private bool TryGetWallMovementBasis(
+        Vector3 wallNormal,
+        out Vector3 wallUp,
+        out Vector3 wallRight)
+    {
+        wallUp = Vector3.zero;
+        wallRight = Vector3.zero;
+        if (wallNormal.sqrMagnitude < 0.5f)
+        {
+            return false;
+        }
+
+        Vector3 stableWallNormal = wallNormal.normalized;
+        Vector3 projectedWorldUp = Vector3.ProjectOnPlane(Vector3.up, stableWallNormal);
+        if (projectedWorldUp.sqrMagnitude > 0.0001f)
+        {
+            wallUp = projectedWorldUp.normalized;
+            if (Vector3.Dot(wallUp, Vector3.up) < 0f)
+            {
+                wallUp = -wallUp;
+            }
+        }
+        else if (_lastValidWallUp.sqrMagnitude > 0.5f)
+        {
+            wallUp = Vector3.ProjectOnPlane(_lastValidWallUp, stableWallNormal).normalized;
+        }
+
+        if (wallUp.sqrMagnitude < 0.5f)
+        {
+            return false;
+        }
+
+        Transform gameplayCamera = cameraModeManager != null && cameraModeManager.tpsCamera != null
+            ? cameraModeManager.tpsCamera.transform
+            : mainCamera != null
+                ? mainCamera.transform
+                : null;
+        Vector3 cameraRight = gameplayCamera != null
+            ? gameplayCamera.right
+            : transform.right;
+        Vector3 projectedCameraRight = Vector3.ProjectOnPlane(
+            cameraRight,
+            stableWallNormal
+        );
+        bool usedDirectCameraRight = projectedCameraRight.sqrMagnitude > 0.0001f;
+        if (usedDirectCameraRight)
+        {
+            wallRight = projectedCameraRight.normalized;
+        }
+        else if (_lastValidWallRight.sqrMagnitude > 0.5f)
+        {
+            wallRight = Vector3.ProjectOnPlane(
+                _lastValidWallRight,
+                stableWallNormal
+            ).normalized;
+        }
+
+        if (wallRight.sqrMagnitude < 0.5f)
+        {
+            wallRight = Vector3.Cross(stableWallNormal, wallUp).normalized;
+            if (Vector3.Dot(wallRight, cameraRight) < 0f)
+            {
+                wallRight = -wallRight;
+            }
+        }
+
+        if (!usedDirectCameraRight &&
+            _lastValidWallRight.sqrMagnitude > 0.5f &&
+            Vector3.Dot(wallRight, _lastValidWallRight) < 0f)
+        {
+            wallRight = -wallRight;
+        }
+
+        _lastValidWallUp = wallUp;
+        _lastValidWallRight = wallRight;
+        return true;
+    }
+
+    private void ResetWallMovementBasis()
+    {
+        _lastValidWallUp = Vector3.zero;
+        _lastValidWallRight = Vector3.zero;
+    }
+
+    private static Vector3 GetStableOutwardWallNormal(
+        Vector3 candidateNormal,
+        Vector3 wallPoint,
+        Vector3 currentWallNormal,
+        Vector3 playerPosition)
+    {
+        if (candidateNormal.sqrMagnitude < 0.0001f)
+        {
+            return currentWallNormal.sqrMagnitude > 0.0001f
+                ? currentWallNormal.normalized
+                : Vector3.forward;
+        }
+
+        candidateNormal.Normalize();
+        Vector3 wallToPlayer = playerPosition - wallPoint;
+        if (wallToPlayer.sqrMagnitude > 0.0001f &&
+            Vector3.Dot(candidateNormal, wallToPlayer) < 0f)
+        {
+            candidateNormal = -candidateNormal;
+        }
+
+        if (currentWallNormal.sqrMagnitude > 0.5f &&
+            Vector3.Dot(candidateNormal, currentWallNormal) < 0f)
+        {
+            candidateNormal = -candidateNormal;
+        }
+
+        return candidateNormal;
+    }
+
+    private void MaintainWallAttachment(RaycastHit wallHit)
+    {
+        if (!IsWallAttached || _characterController == null)
+        {
+            return;
+        }
+
+        Vector3 outwardNormal = GetStableOutwardWallNormal(
+            wallHit.normal,
+            wallHit.point,
+            WallNormal,
+            transform.position
+        );
+        Vector3 candidateNormal = Vector3.Slerp(
+            WallNormal,
+            outwardNormal,
+            Mathf.Clamp01(wallNormalSmoothingSpeed * Time.deltaTime)
+        ).normalized;
+        Quaternion candidateBaseAlignment = AlignBackDirectionToWall(
+            _baseWallAlignmentRotation,
+            _detectedBackLocalDirection,
+            candidateNormal
+        );
+        Quaternion candidateRotation =
+            Quaternion.AngleAxis(_wallUserRotationDegrees, candidateNormal) *
+            candidateBaseAlignment;
+        if (TryCalculateWallPlacement(
+                transform.position,
+                candidateRotation,
+                _localWallVisualBounds,
+                wallHit.collider,
+                candidateNormal,
+                wallHit.point,
+                out Vector3 safePosition,
+                out float safeDistance))
+        {
+            Vector3 correction = safePosition - transform.position;
+            float maximumCorrection = wallSnapSpeed * Time.deltaTime;
+            if (correction.magnitude > maximumCorrection)
+            {
+                correction = correction.normalized * maximumCorrection;
+            }
+
+            _characterController.Move(correction);
+            AttachedWallCollider = wallHit.collider;
+            WallNormal = candidateNormal;
+            _wallHitPoint = wallHit.point;
+            _wallDistance = safeDistance;
+            _baseWallAlignmentRotation = candidateBaseAlignment;
+            propVisualRoot.rotation = candidateRotation;
+            _propVisualRotationOffset = candidateRotation;
+            Physics.SyncTransforms();
+        }
+    }
+
+    private bool TryFindAttachableWall(out RaycastHit wallHit)
+    {
+        wallHit = default;
+        Camera rayCamera = cameraModeManager != null && cameraModeManager.tpsCamera != null
+            ? cameraModeManager.tpsCamera
+            : mainCamera != null
+                ? mainCamera
+                : Camera.main;
+        if (rayCamera == null)
+        {
+            return false;
+        }
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            rayCamera.transform.position,
+            rayCamera.transform.forward,
+            Mathf.Max(interactionDistance, wallAttachMaxDistance + 5f),
+            attachSurfaceMask,
+            QueryTriggerInteraction.Ignore
+        );
+        Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            Vector3 distanceOrigin = _characterController != null
+                ? transform.TransformPoint(_characterController.center)
+                : transform.position;
+            if (!IsValidAttachSurface(hit) ||
+                Vector3.Distance(distanceOrigin, hit.point) > wallAttachMaxDistance ||
+                (playableAreaBounds != null && !playableAreaBounds.Contains(hit.point)))
+            {
+                continue;
+            }
+
+            wallHit = hit;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsValidAttachSurface(RaycastHit hit)
+    {
+        Collider candidate = hit.collider;
+        if (candidate == null ||
+            !candidate.enabled ||
+            candidate.isTrigger ||
+            candidate.transform == transform ||
+            candidate.transform.IsChildOf(transform) ||
+            candidate.GetComponentInParent<PropTransformSystem>() != null ||
+            candidate.GetComponentInParent<CharacterController>() != null ||
+            (attachSurfaceMask.value & (1 << candidate.gameObject.layer)) == 0)
+        {
+            return false;
+        }
+
+        Rigidbody body = candidate.attachedRigidbody;
+        if (body != null && !body.isKinematic)
+        {
+            return false;
+        }
+
+        float upDot = Mathf.Abs(Vector3.Dot(hit.normal.normalized, Vector3.up));
+        return upDot <= maximumWallUpDot && IsInsidePlayableArea(hit.point);
+    }
+
+    private bool TryPrepareWallVisual(
+        Transform analysisRoot,
+        string cacheKey,
+        Quaternion seedRotation,
+        Vector3 wallNormal,
+        out PropWallGeometry geometry,
+        out Quaternion baseAlignment,
+        out Quaternion visualRotation)
+    {
+        geometry = default;
+        baseAlignment = seedRotation;
+        visualRotation = seedRotation;
+        if (!PropWallGeometryAnalyzer.TryGetOrAnalyze(analysisRoot, cacheKey, out geometry))
+        {
+            return false;
+        }
+
+        Vector3 backLocalDirection = geometry.DetectedBackLocalDirection;
+        if (!geometry.HasDetectedBack)
+        {
+            backLocalDirection = FindClosestFallbackBackDirection(seedRotation, -wallNormal);
+            string warningKey = string.IsNullOrEmpty(cacheKey) ? analysisRoot.name : cacheKey;
+            if (_backAnalysisWarnings.Add(warningKey))
+            {
+                Debug.LogWarning(
+                    $"Wall Attach: Could not confidently detect the open back of '{warningKey}'. " +
+                    "Using the nearest current horizontal face."
+                );
+            }
+
+            geometry = new PropWallGeometry(
+                geometry.LocalBounds,
+                backLocalDirection,
+                geometry.Confidence,
+                false
+            );
+        }
+
+        baseAlignment = AlignBackDirectionToWall(
+            seedRotation,
+            backLocalDirection,
+            wallNormal
+        );
+        visualRotation =
+            Quaternion.AngleAxis(_wallUserRotationDegrees, wallNormal) * baseAlignment;
+        Debug.Log(
+            $"Wall Attach: Detected prop back direction={backLocalDirection}\n" +
+            $"Confidence={geometry.Confidence:0.000}."
+        );
+        return true;
+    }
+
+    private bool TryCalculateWallPlacement(
+        Vector3 desiredPlayerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds,
+        Collider wallCollider,
+        Vector3 wallNormal,
+        Vector3 wallPoint,
+        out Vector3 safePlayerPosition,
+        out float safeDistance)
+    {
+        safePlayerPosition = desiredPlayerPosition;
+        safeDistance = 0f;
+        if (wallCollider == null || _characterController == null)
+        {
+            return false;
+        }
+
+        float controllerClearance =
+            _characterController.radius + _characterController.skinWidth + wallSurfaceGap;
+        float playerDistance = Vector3.Dot(desiredPlayerPosition - wallPoint, wallNormal);
+        float minimumVisualDistance = GetMinimumVisualPlaneDistance(
+            desiredPlayerPosition,
+            visualRotation,
+            localVisualBounds,
+            wallPoint,
+            wallNormal
+        );
+        float correction = Mathf.Max(
+            controllerClearance - playerDistance,
+            wallSurfaceGap - minimumVisualDistance
+        );
+        safePlayerPosition = desiredPlayerPosition + wallNormal * correction;
+        safeDistance = Vector3.Dot(safePlayerPosition - wallPoint, wallNormal);
+
+        return CanUseWallPose(
+            safePlayerPosition,
+            visualRotation,
+            localVisualBounds,
+            wallCollider,
+            wallPoint,
+            wallNormal
+        );
+    }
+
+    private bool CanUseWallPose(
+        Vector3 playerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds,
+        Collider attachedWall,
+        Vector3 wallPoint,
+        Vector3 wallNormal)
+    {
+        float playerClearance =
+            _characterController.radius + _characterController.skinWidth + wallSurfaceGap;
+        if (Vector3.Dot(playerPosition - wallPoint, wallNormal) < playerClearance - 0.002f ||
+            GetMinimumVisualPlaneDistance(
+                playerPosition,
+                visualRotation,
+                localVisualBounds,
+                wallPoint,
+                wallNormal) < wallSurfaceGap - 0.002f ||
+            !AreVisualCornersInsidePlayableArea(
+                playerPosition,
+                visualRotation,
+                localVisualBounds) ||
+            !IsCapsulePositionClear(playerPosition, attachedWall, wallPoint, wallNormal) ||
+            !IsVisualPoseClear(
+                playerPosition,
+                visualRotation,
+                localVisualBounds,
+                attachedWall,
+                wallPoint,
+                wallNormal) ||
+            !TryFindSupportingWall(
+                playerPosition,
+                attachedWall,
+                wallPoint,
+                wallNormal,
+                out _))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryFindSupportingWall(
+        Vector3 playerPosition,
+        Collider expectedWall,
+        Vector3 expectedWallPoint,
+        Vector3 expectedNormal,
+        out RaycastHit wallHit)
+    {
+        wallHit = default;
+        if (expectedWall == null || _characterController == null)
+        {
+            return false;
+        }
+
+        Vector3 capsuleCenterOffset =
+            transform.rotation * _characterController.center;
+        Vector3 origin = playerPosition + capsuleCenterOffset + expectedNormal * 0.2f;
+        float playerPlaneDistance =
+            Mathf.Abs(Vector3.Dot(playerPosition - expectedWallPoint, expectedNormal));
+        RaycastHit[] hits = Physics.RaycastAll(
+            origin,
+            -expectedNormal,
+            Mathf.Max(0.75f, playerPlaneDistance + 0.75f),
+            attachSurfaceMask,
+            QueryTriggerInteraction.Ignore
+        );
+        Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            if (!IsValidAttachSurface(hit))
+            {
+                continue;
+            }
+
+            bool sameCollider = hit.collider == expectedWall;
+            Vector3 candidateNormal = GetStableOutwardWallNormal(
+                hit.normal,
+                hit.point,
+                expectedNormal,
+                playerPosition
+            );
+            bool coplanarContinuation =
+                Vector3.Dot(candidateNormal, expectedNormal) >= 0.94f &&
+                Mathf.Abs(Vector3.Dot(
+                    hit.point - expectedWallPoint,
+                    expectedNormal)) <= 0.12f;
+            if (sameCollider || coplanarContinuation)
+            {
+                wallHit = hit;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsCapsulePositionClear(
+        Vector3 playerPosition,
+        Collider ignoredWall,
+        Vector3 wallPoint,
+        Vector3 wallNormal)
+    {
+        Vector3 worldCenter =
+            playerPosition + transform.rotation * _characterController.center;
+        float radius = _characterController.radius;
+        float halfLine = Mathf.Max(0f, _characterController.height * 0.5f - radius);
+        Vector3 top = worldCenter + Vector3.up * halfLine;
+        Vector3 bottom = worldCenter - Vector3.up * halfLine;
+        float capsuleBottomY = worldCenter.y - _characterController.height * 0.5f;
+        Collider[] overlaps = Physics.OverlapCapsule(
+            top,
+            bottom,
+            radius,
+            ~0,
+            QueryTriggerInteraction.Ignore
+        );
+
+        foreach (Collider overlap in overlaps)
+        {
+            if (overlap == null ||
+                overlap == ignoredWall ||
+                overlap.transform == transform ||
+                overlap.transform.IsChildOf(transform) ||
+                IsColliderOnSupportingPlane(overlap, worldCenter, wallPoint, wallNormal, radius) ||
+                overlap.bounds.max.y <= capsuleBottomY + 0.08f)
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsVisualPoseClear(
+        Vector3 playerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds,
+        Collider ignoredWall,
+        Vector3 wallPoint,
+        Vector3 wallNormal)
+    {
+        Vector3 visualPosition = GetVisualPositionForPlayer(playerPosition);
+        Vector3 worldCenter = visualPosition + visualRotation * localVisualBounds.center;
+        Vector3 overlapExtents = Vector3.Max(localVisualBounds.extents - Vector3.one * 0.01f, Vector3.one * 0.01f);
+        Collider[] overlaps = Physics.OverlapBox(
+            worldCenter,
+            overlapExtents,
+            visualRotation,
+            ~0,
+            QueryTriggerInteraction.Ignore
+        );
+        Vector3[] worldCorners = GetVisualWorldCorners(
+            playerPosition,
+            visualRotation,
+            localVisualBounds
+        );
+        float minimumY = worldCorners[0].y;
+        foreach (Vector3 corner in worldCorners)
+        {
+            minimumY = Mathf.Min(minimumY, corner.y);
+        }
+
+        foreach (Collider overlap in overlaps)
+        {
+            if (overlap == null ||
+                overlap == ignoredWall ||
+                overlap.transform == transform ||
+                overlap.transform.IsChildOf(transform) ||
+                IsColliderOnSupportingPlane(
+                    overlap,
+                    worldCenter,
+                    wallPoint,
+                    wallNormal,
+                    Vector3.Dot(overlapExtents, AbsVector(wallNormal))) ||
+                overlap.bounds.max.y <= minimumY + 0.08f)
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsColliderOnSupportingPlane(
+        Collider candidate,
+        Vector3 poseCenter,
+        Vector3 wallPoint,
+        Vector3 wallNormal,
+        float castPadding)
+    {
+        if (candidate == null ||
+            candidate.isTrigger ||
+            candidate.GetComponentInParent<CharacterController>() != null ||
+            (candidate.attachedRigidbody != null &&
+             !candidate.attachedRigidbody.isKinematic))
+        {
+            return false;
+        }
+
+        float rayDistance = Mathf.Max(1f, castPadding * 2f + 1f);
+        Ray ray = new Ray(
+            poseCenter + wallNormal * (castPadding + 0.5f),
+            -wallNormal
+        );
+        return candidate.Raycast(ray, out RaycastHit hit, rayDistance) &&
+               Vector3.Dot(hit.normal.normalized, wallNormal) >= 0.94f &&
+               Mathf.Abs(Vector3.Dot(hit.point - wallPoint, wallNormal)) <= 0.12f;
+    }
+
+    private float GetMinimumVisualPlaneDistance(
+        Vector3 playerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds,
+        Vector3 wallPoint,
+        Vector3 wallNormal)
+    {
+        Vector3[] corners = GetVisualWorldCorners(
+            playerPosition,
+            visualRotation,
+            localVisualBounds
+        );
+        float minimumDistance = float.PositiveInfinity;
+        foreach (Vector3 corner in corners)
+        {
+            minimumDistance = Mathf.Min(
+                minimumDistance,
+                Vector3.Dot(corner - wallPoint, wallNormal)
+            );
+        }
+
+        return minimumDistance;
+    }
+
+    private bool AreVisualCornersInsidePlayableArea(
+        Vector3 playerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds)
+    {
+        if (!IsInsidePlayableArea(playerPosition))
+        {
+            return false;
+        }
+
+        if (playableAreaBounds == null)
+        {
+            return true;
+        }
+
+        foreach (Vector3 corner in GetVisualWorldCorners(
+                     playerPosition,
+                     visualRotation,
+                     localVisualBounds))
+        {
+            if (!playableAreaBounds.Contains(corner))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private Vector3[] GetVisualWorldCorners(
+        Vector3 playerPosition,
+        Quaternion visualRotation,
+        Bounds localVisualBounds)
+    {
+        Vector3 minimum = localVisualBounds.min;
+        Vector3 maximum = localVisualBounds.max;
+        Vector3 visualPosition = GetVisualPositionForPlayer(playerPosition);
+        Vector3[] corners = new Vector3[8];
+        int index = 0;
+        for (int x = 0; x <= 1; x++)
+        {
+            for (int y = 0; y <= 1; y++)
+            {
+                for (int z = 0; z <= 1; z++)
+                {
+                    Vector3 localCorner = new Vector3(
+                        x == 0 ? minimum.x : maximum.x,
+                        y == 0 ? minimum.y : maximum.y,
+                        z == 0 ? minimum.z : maximum.z
+                    );
+                    corners[index++] = visualPosition + visualRotation * localCorner;
+                }
+            }
+        }
+
+        return corners;
+    }
+
+    private Vector3 GetVisualPositionForPlayer(Vector3 playerPosition)
+    {
+        return propVisualRoot != null
+            ? playerPosition + (propVisualRoot.position - transform.position)
+            : playerPosition;
+    }
+
+    private static Quaternion AlignBackDirectionToWall(
+        Quaternion seedRotation,
+        Vector3 backLocalDirection,
+        Vector3 wallNormal)
+    {
+        Vector3 currentBackWorldDirection = seedRotation * backLocalDirection.normalized;
+        Vector3 desiredBackWorldDirection = -wallNormal.normalized;
+        return Quaternion.FromToRotation(
+            currentBackWorldDirection,
+            desiredBackWorldDirection
+        ) * seedRotation;
+    }
+
+    private static Vector3 FindClosestFallbackBackDirection(
+        Quaternion seedRotation,
+        Vector3 desiredBackWorldDirection)
+    {
+        Vector3[] localDirections =
+        {
+            Vector3.forward,
+            Vector3.back,
+            Vector3.right,
+            Vector3.left
+        };
+        Vector3 bestDirection = localDirections[0];
+        float bestDot = Vector3.Dot(seedRotation * bestDirection, desiredBackWorldDirection);
+        for (int index = 1; index < localDirections.Length; index++)
+        {
+            float dot = Vector3.Dot(
+                seedRotation * localDirections[index],
+                desiredBackWorldDirection
+            );
+            if (dot > bestDot)
+            {
+                bestDot = dot;
+                bestDirection = localDirections[index];
+            }
+        }
+
+        return bestDirection;
+    }
+
+    private static Vector3 AbsVector(Vector3 value)
+    {
+        return new Vector3(Mathf.Abs(value.x), Mathf.Abs(value.y), Mathf.Abs(value.z));
+    }
+
+    private bool IsInsidePlayableArea(Vector3 worldPosition)
+    {
+        return playableAreaBounds == null ||
+               playableAreaBounds.Contains(
+                   worldPosition,
+                   _characterController != null ? _characterController.radius : 0f
+               );
+    }
+
+    private static float ReadPropRotationInput()
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Keyboard.current != null)
+        {
+            return
+                (Keyboard.current.rightArrowKey.isPressed ? 1f : 0f) -
+                (Keyboard.current.leftArrowKey.isPressed ? 1f : 0f);
+        }
+#endif
+        return 0f;
+    }
+
+    private bool CanEnterGhostCamera()
+    {
+        if (!CanAttemptEnterGhostCamera() ||
+            cameraModeManager == null ||
+            cameraModeManager.tpsCamera == null)
+        {
+            return false;
+        }
+
+        return IsWallAttached || IsHiderGrounded();
+    }
+
+    private bool CanAttemptEnterGhostCamera()
+    {
+        return !IsGhostCameraActive &&
+               playerRole == PlayerRole.Hider &&
+               !IsEliminated &&
+               !IsChangingModel &&
+               currentState == PlayerDisguiseState.Disguised &&
+               (roundManager == null || roundManager.IsAbilityPhaseActive());
+    }
+
+    private bool CanRemainInGhostCamera()
+    {
+        return !IsEliminated &&
+               currentState == PlayerDisguiseState.Disguised &&
+               (roundManager == null || roundManager.IsAbilityPhaseActive());
+    }
+
+    private bool IsHiderGrounded()
+    {
+        if (_characterController != null)
+        {
+            return _characterController.isGrounded;
+        }
+
+        return _firstPersonController != null && _firstPersonController.Grounded;
+    }
+
+    private void TryEnterGhostCamera()
+    {
+        if (!CanEnterGhostCamera())
+        {
+            if (currentState == PlayerDisguiseState.Disguised &&
+                !IsWallAttached &&
+                !IsHiderGrounded())
+            {
+                Debug.Log("GhostCamera: Cannot enter while airborne.");
+            }
+
+            return;
+        }
+
+        _lockedHiderPosition = transform.position;
+        _lockedHiderRotation = transform.rotation;
+        _cameraModeBeforeGhost = cameraModeManager.CurrentMode;
+        _firstPersonControllerWasEnabled =
+            _firstPersonController != null && _firstPersonController.enabled;
+        _controllerWasAlreadyLocked =
+            _firstPersonController != null && _firstPersonController.IsControlLocked;
+        _cursorLockModeBeforeGhost = Cursor.lockState;
+        _cursorVisibleBeforeGhost = Cursor.visible;
+
+        if (!cameraModeManager.BeginGhostCamera(_lockedHiderPosition, transform))
+        {
+            return;
+        }
+
+        IsGhostCameraActive = true;
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.SetControlLocked(true);
+        }
+
+        ClearGameplayInputForGhostCamera();
+        Debug.Log(
+            $"GhostCamera: Entered. Anchor={_lockedHiderPosition}, Radius=10m."
+        );
+    }
+
+    public void ForceExitGhostCamera()
+    {
+        if (!IsGhostCameraActive)
+        {
+            return;
+        }
+
+        IsGhostCameraActive = false;
+        transform.SetPositionAndRotation(_lockedHiderPosition, _lockedHiderRotation);
+
+        if (_firstPersonController != null)
+        {
+            _firstPersonController.enabled = _firstPersonControllerWasEnabled;
+            _firstPersonController.SetControlLocked(_controllerWasAlreadyLocked);
+        }
+
+        ClearGameplayInputForGhostCamera();
+
+        if (cameraModeManager != null)
+        {
+            cameraModeManager.SetMode(_cameraModeBeforeGhost);
+            if (_cameraModeBeforeGhost == PlayerCameraMode.PropTPS)
+            {
+                cameraModeManager.RefreshCurrentPropCamera();
+                cameraModeManager.ForceCameraToSafePosition();
+            }
+        }
+
+        Cursor.lockState = _cursorLockModeBeforeGhost;
+        Cursor.visible = _cursorVisibleBeforeGhost;
+        Debug.Log("GhostCamera: Exited. Player controls restored.");
+    }
+
+    private void KeepHiderLockedInPlace()
+    {
+        if ((transform.position - _lockedHiderPosition).sqrMagnitude > 0.000001f ||
+            Quaternion.Angle(transform.rotation, _lockedHiderRotation) > 0.001f)
+        {
+            transform.SetPositionAndRotation(_lockedHiderPosition, _lockedHiderRotation);
+        }
+    }
+
+    private void ClearGameplayInputForGhostCamera()
+    {
+        if (_input == null)
+        {
+            return;
+        }
+
+        _input.move = Vector2.zero;
+        _input.look = Vector2.zero;
+        _input.jump = false;
+        _input.sprint = false;
+        _input.interact = false;
+        _input.cancelDisguise = false;
+        _input.spectatorToggle = false;
+    }
+
+    private void HandleRoundStateChanged(PropHuntRoundState state)
+    {
+        if (state == PropHuntRoundState.Waiting ||
+            state == PropHuntRoundState.Preparation ||
+            state == PropHuntRoundState.Ended)
+        {
+            ForceExitGhostCamera();
+            ForceDetachFromWall();
+            ResetWallMovementBasis();
+            if (cameraModeManager != null)
+            {
+                cameraModeManager.ResetAdaptiveCamera();
+            }
+        }
+    }
+
     public bool TryGetLookedAtProp(out PropTarget prop)
     {
         return TryGetLookedAtProp(out prop, out _);
@@ -567,8 +2109,10 @@ public class PropTransformSystem : MonoBehaviour
         }
 
         prop = hit.collider.GetComponentInParent<PropTarget>();
-        if (prop == null)
+        if (prop == null || !prop.GameplayEnabled)
         {
+            prop = null;
+            sourceVisual = null;
             return false;
         }
 
@@ -695,6 +2239,72 @@ public class PropTransformSystem : MonoBehaviour
             Destroy(_debugMaterial);
             _debugMaterial = null;
         }
+    }
+
+    public bool TryCreateDetachedVisualCopy(
+        Transform parent,
+        out GameObject detachedVisualRoot)
+    {
+        detachedVisualRoot = null;
+        if (parent == null ||
+            !IsDisguised ||
+            IsChangingModel ||
+            propVisualRoot == null ||
+            _currentPropVisual == null ||
+            !_currentPropVisual.activeInHierarchy)
+        {
+            return false;
+        }
+
+        GameObject root = new GameObject("CloneVisualRoot");
+        root.transform.SetParent(parent, false);
+        root.transform.localPosition = Vector3.zero;
+        root.transform.localRotation = Quaternion.identity;
+        root.transform.localScale = Vector3.one;
+
+        GameObject visualCopy = Instantiate(_currentPropVisual, root.transform, false);
+        visualCopy.name = "CapturedPropVisual";
+        StripPhysicsAndGameplayComponents(visualCopy);
+        ClearStaticFlagsRuntime(visualCopy);
+        ActivateRenderers(visualCopy);
+
+        Renderer[] renderers = visualCopy.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0 || ContainsCombinedMesh(visualCopy))
+        {
+            Destroy(root);
+            return false;
+        }
+
+        root.SetActive(true);
+        visualCopy.SetActive(true);
+        detachedVisualRoot = root;
+        return true;
+    }
+
+    private static bool ContainsCombinedMesh(GameObject root)
+    {
+        if (root == null)
+        {
+            return false;
+        }
+
+        foreach (MeshFilter meshFilter in root.GetComponentsInChildren<MeshFilter>(true))
+        {
+            if (meshFilter != null && IsCombinedMesh(meshFilter.sharedMesh))
+            {
+                return true;
+            }
+        }
+
+        foreach (SkinnedMeshRenderer renderer in root.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+        {
+            if (renderer != null && IsCombinedMesh(renderer.sharedMesh))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static GameObject CreatePropModelFromVisualParts(PropTarget prop, Transform parent)

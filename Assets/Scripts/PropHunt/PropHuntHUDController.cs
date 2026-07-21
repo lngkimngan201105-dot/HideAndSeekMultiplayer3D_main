@@ -9,6 +9,11 @@ public class PropHuntHUDController : MonoBehaviour
     [SerializeField] private PropTransformSystem propTransformSystem;
     [SerializeField] private HiderAbilityController abilityController;
     [SerializeField] private HiderAntiCampSystem antiCampSystem;
+    [SerializeField] private HiderHealth hiderHealth;
+    [SerializeField] private HiderRosterManager hiderRoster;
+    [SerializeField] private HiderEliminationController eliminationController;
+    [SerializeField] private HiderSpectatorController spectatorController;
+    [SerializeField] private PropHuntTestRoleSelector testRoleSelector;
 
     [Header("Top Round Bar")]
     [SerializeField] private TextMeshProUGUI seekerCountText;
@@ -20,27 +25,51 @@ public class PropHuntHUDController : MonoBehaviour
     [SerializeField] private TextMeshProUGUI hiderContextText;
 
     [Header("Ability Values")]
-    [SerializeField] private TextMeshProUGUI speedChargeText;
+    [SerializeField] private TextMeshProUGUI cloneChargeText;
     [SerializeField] private TextMeshProUGUI randomChargeText;
     [SerializeField] private TextMeshProUGUI antiCampCountdownText;
-    [SerializeField] private Image speedCooldownOverlay;
     [SerializeField] private Image randomCooldownOverlay;
-    [SerializeField] private Image speedIcon;
+    [SerializeField] private Image cloneIcon;
     [SerializeField] private Image antiCampIcon;
     [SerializeField] private Image randomPropIcon;
 
     [Header("HUD Groups")]
     [SerializeField] private GameObject hiderAbilityPanel;
-    [SerializeField] private CanvasGroup speedCardGroup;
+    [SerializeField] private CanvasGroup cloneCardGroup;
     [SerializeField] private CanvasGroup antiCampCardGroup;
     [SerializeField] private CanvasGroup randomCardGroup;
 
+    [Header("Hider Health Bar")]
+    [SerializeField] private GameObject hiderHealthBar;
+    [SerializeField] private Image hiderHealthFill;
+    [SerializeField] private TextMeshProUGUI hiderHealthText;
+
+    [Header("Spectator Status")]
+    [SerializeField] private GameObject spectatorStatusPanel;
+    [SerializeField] private TextMeshProUGUI spectatorStatusText;
+
     private static readonly Color NormalIconColor = Color.white;
     private static readonly Color DisabledIconColor = new Color(0.38f, 0.38f, 0.38f, 0.72f);
+    private static readonly Color HealthyColor = new Color32(52, 199, 89, 255);
+    private static readonly Color WarningColor = new Color32(255, 204, 0, 255);
+    private static readonly Color CriticalColor = new Color32(255, 69, 58, 255);
 
     private void Awake()
     {
         ResolveMissingReferences();
+    }
+
+    private void OnEnable()
+    {
+        ResolveMissingReferences();
+        SubscribeToEvents();
+        UpdateHealthBar();
+        UpdateSpectatorPanel();
+    }
+
+    private void OnDisable()
+    {
+        UnsubscribeFromEvents();
     }
 
     private void Update()
@@ -48,6 +77,7 @@ public class PropHuntHUDController : MonoBehaviour
         UpdateTopRoundBar();
         UpdateContextPanel();
         UpdateAbilityPanel();
+        UpdateSpectatorPanel();
     }
 
     public void Configure(
@@ -55,51 +85,77 @@ public class PropHuntHUDController : MonoBehaviour
         PropTransformSystem transformSystem,
         HiderAbilityController configuredAbilityController,
         HiderAntiCampSystem configuredAntiCampSystem,
+        HiderHealth configuredHiderHealth,
+        HiderRosterManager configuredRoster,
+        HiderEliminationController configuredEliminationController,
+        HiderSpectatorController configuredSpectatorController,
+        PropHuntTestRoleSelector configuredRoleSelector,
         TextMeshProUGUI configuredSeekerCountText,
         TextMeshProUGUI configuredTimerText,
         TextMeshProUGUI configuredHiderCountText,
         GameObject configuredContextPanel,
         TextMeshProUGUI configuredContextText,
-        TextMeshProUGUI configuredSpeedChargeText,
+        TextMeshProUGUI configuredCloneChargeText,
         TextMeshProUGUI configuredRandomChargeText,
         TextMeshProUGUI configuredAntiCampCountdownText,
-        Image configuredSpeedCooldownOverlay,
         Image configuredRandomCooldownOverlay,
-        Image configuredSpeedIcon,
+        Image configuredCloneIcon,
         Image configuredAntiCampIcon,
         Image configuredRandomPropIcon,
         GameObject configuredAbilityPanel,
-        CanvasGroup configuredSpeedCardGroup,
+        CanvasGroup configuredCloneCardGroup,
         CanvasGroup configuredAntiCampCardGroup,
-        CanvasGroup configuredRandomCardGroup)
+        CanvasGroup configuredRandomCardGroup,
+        GameObject configuredHealthBar,
+        Image configuredHealthFill,
+        TextMeshProUGUI configuredHealthText,
+        GameObject configuredSpectatorStatusPanel,
+        TextMeshProUGUI configuredSpectatorStatusText)
     {
+        if (Application.isPlaying)
+        {
+            UnsubscribeFromEvents();
+        }
+
         roundManager = configuredRoundManager;
         propTransformSystem = transformSystem;
         abilityController = configuredAbilityController;
         antiCampSystem = configuredAntiCampSystem;
+        hiderHealth = configuredHiderHealth;
+        hiderRoster = configuredRoster;
+        eliminationController = configuredEliminationController;
+        spectatorController = configuredSpectatorController;
+        testRoleSelector = configuredRoleSelector;
         seekerCountText = configuredSeekerCountText;
         timerText = configuredTimerText;
         hiderCountText = configuredHiderCountText;
         hiderContextPanel = configuredContextPanel;
         hiderContextText = configuredContextText;
-        speedChargeText = configuredSpeedChargeText;
+        cloneChargeText = configuredCloneChargeText;
         randomChargeText = configuredRandomChargeText;
         antiCampCountdownText = configuredAntiCampCountdownText;
-        speedCooldownOverlay = configuredSpeedCooldownOverlay;
         randomCooldownOverlay = configuredRandomCooldownOverlay;
-        speedIcon = configuredSpeedIcon;
+        cloneIcon = configuredCloneIcon;
         antiCampIcon = configuredAntiCampIcon;
         randomPropIcon = configuredRandomPropIcon;
         hiderAbilityPanel = configuredAbilityPanel;
-        speedCardGroup = configuredSpeedCardGroup;
+        cloneCardGroup = configuredCloneCardGroup;
         antiCampCardGroup = configuredAntiCampCardGroup;
         randomCardGroup = configuredRandomCardGroup;
+        hiderHealthBar = configuredHealthBar;
+        hiderHealthFill = configuredHealthFill;
+        hiderHealthText = configuredHealthText;
+        spectatorStatusPanel = configuredSpectatorStatusPanel;
+        spectatorStatusText = configuredSpectatorStatusText;
 
         if (Application.isPlaying)
         {
+            SubscribeToEvents();
             UpdateTopRoundBar();
             UpdateContextPanel();
             UpdateAbilityPanel();
+            UpdateHealthBar();
+            UpdateSpectatorPanel();
         }
     }
 
@@ -115,6 +171,10 @@ public class PropHuntHUDController : MonoBehaviour
 
         SetText(seekerCountText, $"THỢ SĂN {roundManager.SeekerCount:00}");
         SetText(hiderCountText, $"ĐỒ VẬT {roundManager.AliveHiderCount:00}");
+        int aliveHiders = hiderRoster != null
+            ? hiderRoster.AliveHiderCount
+            : roundManager.AliveHiderCount;
+        SetText(hiderCountText, $"ĐỒ VẬT {aliveHiders:00}");
         SetText(timerText, roundManager.CurrentState == PropHuntRoundState.Waiting
             ? FormatTime(roundManager.PreparationDuration)
             : FormatTime(roundManager.RemainingTime));
@@ -123,7 +183,8 @@ public class PropHuntHUDController : MonoBehaviour
     private void UpdateContextPanel()
     {
         bool isHider = propTransformSystem != null && propTransformSystem.playerRole == PlayerRole.Hider;
-        if (!isHider || propTransformSystem.IsEliminated ||
+        bool hiderRoleActive = testRoleSelector == null || testRoleSelector.IsHiderRoleActive;
+        if (!isHider || !hiderRoleActive || propTransformSystem.IsEliminated ||
             propTransformSystem.currentState == PlayerDisguiseState.Spectator)
         {
             SetContextVisible(false, string.Empty, 58f);
@@ -132,11 +193,42 @@ public class PropHuntHUDController : MonoBehaviour
 
         if (propTransformSystem.currentState == PlayerDisguiseState.Disguised)
         {
+            if (propTransformSystem.IsGhostCameraActive)
+            {
+                SetContextVisible(
+                    true,
+                    "<color=#F4C430><b>Tab</b></color>  để quay lại Hider",
+                    GetContextHeight(1)
+                );
+                return;
+            }
+
+            if (propTransformSystem.IsWallAttached)
+            {
+                SetContextVisible(
+                    true,
+                    "<color=#F4C430><b>WASD</b></color>     để leo trên tường\n" +
+                    "<color=#F4C430><b>E</b></color>        để tách khỏi tường\n" +
+                    "<color=#F4C430><b>Space</b></color>    để nhảy khỏi tường\n" +
+                    "<color=#F4C430><b>← / →</b></color>    để xoay hình dạng\n" +
+                    "<color=#F4C430><b>Tab</b></color>      để quan sát",
+                    GetContextHeight(5)
+                );
+                return;
+            }
+
+            bool canAttachToWall = propTransformSystem.CanAttachToWall();
+            string attachLine = canAttachToWall
+                ? "<color=#F4C430><b>E</b></color>        để bám vào tường\n"
+                : string.Empty;
+
             SetContextVisible(
                 true,
-                "<color=#F4C430><b>R</b></color>    để trở lại người\n" +
-                "<color=#F4C430><b>Tab</b></color>  để đổi góc nhìn",
-                92f
+                attachLine +
+                "<color=#F4C430><b>R</b></color>        để trở lại người\n" +
+                "<color=#F4C430><b>← / →</b></color>    để xoay hình dạng\n" +
+                "<color=#F4C430><b>Tab</b></color>      để quan sát",
+                GetContextHeight(canAttachToWall ? 4 : 3)
             );
             return;
         }
@@ -169,27 +261,33 @@ public class PropHuntHUDController : MonoBehaviour
         SetText(hiderContextText, content);
     }
 
+    private static float GetContextHeight(int lineCount)
+    {
+        return 28f + Mathf.Max(1, lineCount) * 28f;
+    }
+
     private void UpdateAbilityPanel()
     {
         bool isHider = propTransformSystem != null && propTransformSystem.playerRole == PlayerRole.Hider;
-        if (hiderAbilityPanel != null && hiderAbilityPanel.activeSelf != isHider)
+        bool hiderRoleActive = testRoleSelector == null || testRoleSelector.IsHiderRoleActive;
+        bool canShowAbilities = isHider && hiderRoleActive && hiderHealth != null && hiderHealth.IsAlive;
+        if (hiderAbilityPanel != null && hiderAbilityPanel.activeSelf != canShowAbilities)
         {
-            hiderAbilityPanel.SetActive(isHider);
+            hiderAbilityPanel.SetActive(canShowAbilities);
         }
 
-        if (!isHider || abilityController == null)
+        if (!canShowAbilities || abilityController == null)
         {
             return;
         }
 
-        SetText(speedChargeText, $"x{abilityController.RemainingSpeedBoostCharges}");
+        SetText(cloneChargeText, $"x{abilityController.RemainingCloneCharges}");
         SetText(randomChargeText, $"x{abilityController.RemainingRandomPropCharges}");
-        SetFill(speedCooldownOverlay, abilityController.SpeedCooldownNormalized);
         SetFill(randomCooldownOverlay, abilityController.RandomPropCooldownNormalized);
 
-        bool speedEmpty = abilityController.RemainingSpeedBoostCharges <= 0;
+        bool cloneEmpty = abilityController.RemainingCloneCharges <= 0;
         bool randomEmpty = abilityController.RemainingRandomPropCharges <= 0;
-        SetIconState(speedIcon, speedCardGroup, speedEmpty, 1f);
+        SetIconState(cloneIcon, cloneCardGroup, cloneEmpty, 1f);
         SetIconState(randomPropIcon, randomCardGroup, randomEmpty, 1f);
 
         bool countdown = antiCampSystem != null && antiCampSystem.IsCountdownActive;
@@ -224,6 +322,147 @@ public class PropHuntHUDController : MonoBehaviour
         {
             antiCampSystem = propTransformSystem.GetComponent<HiderAntiCampSystem>();
         }
+
+        if (hiderHealth == null && propTransformSystem != null)
+        {
+            hiderHealth = propTransformSystem.GetComponent<HiderHealth>();
+        }
+
+        if (hiderRoster == null) hiderRoster = FindObjectOfType<HiderRosterManager>();
+        if (eliminationController == null && propTransformSystem != null)
+            eliminationController = propTransformSystem.GetComponent<HiderEliminationController>();
+        if (spectatorController == null && propTransformSystem != null)
+            spectatorController = propTransformSystem.GetComponent<HiderSpectatorController>();
+        if (testRoleSelector == null) testRoleSelector = FindObjectOfType<PropHuntTestRoleSelector>();
+    }
+
+    private void SubscribeToEvents()
+    {
+        if (hiderHealth != null)
+        {
+            hiderHealth.HealthChanged -= HandleHealthChanged;
+            hiderHealth.HealthChanged += HandleHealthChanged;
+        }
+
+        if (hiderRoster != null)
+        {
+            hiderRoster.AliveCountChanged -= HandleAliveCountChanged;
+            hiderRoster.AliveCountChanged += HandleAliveCountChanged;
+        }
+
+        if (eliminationController != null)
+        {
+            eliminationController.EliminationStateChanged -= HandleEliminationStateChanged;
+            eliminationController.EliminationStateChanged += HandleEliminationStateChanged;
+        }
+
+        if (spectatorController != null)
+        {
+            spectatorController.StatusTextChanged -= HandleSpectatorStatusChanged;
+            spectatorController.StatusTextChanged += HandleSpectatorStatusChanged;
+        }
+    }
+
+    private void UnsubscribeFromEvents()
+    {
+        if (hiderHealth != null)
+        {
+            hiderHealth.HealthChanged -= HandleHealthChanged;
+        }
+
+        if (hiderRoster != null)
+            hiderRoster.AliveCountChanged -= HandleAliveCountChanged;
+        if (eliminationController != null)
+            eliminationController.EliminationStateChanged -= HandleEliminationStateChanged;
+        if (spectatorController != null)
+            spectatorController.StatusTextChanged -= HandleSpectatorStatusChanged;
+    }
+
+    private void HandleHealthChanged(int currentHealth, int maxHealth)
+    {
+        UpdateHealthBar(currentHealth, maxHealth);
+    }
+
+    private void HandleAliveCountChanged(int aliveCount, int totalCount)
+    {
+        SetText(hiderCountText, $"ĐỒ VẬT {aliveCount:00}");
+    }
+
+    private void HandleEliminationStateChanged(bool eliminated)
+    {
+        if (eliminated)
+        {
+            GetComponent<PropHuntZoneHUDController>()?.ClearForElimination();
+        }
+
+        UpdateContextPanel();
+        UpdateAbilityPanel();
+        UpdateSpectatorPanel();
+    }
+
+    private void HandleSpectatorStatusChanged(string status)
+    {
+        SetText(spectatorStatusText, status);
+        UpdateSpectatorPanel();
+    }
+
+    private void UpdateSpectatorPanel()
+    {
+        bool hiderRoleActive = testRoleSelector == null || testRoleSelector.IsHiderRoleActive;
+        bool eliminated = hiderRoleActive && hiderHealth != null && hiderHealth.IsEliminated;
+        if (spectatorStatusPanel != null && spectatorStatusPanel.activeSelf != eliminated)
+        {
+            spectatorStatusPanel.SetActive(eliminated);
+        }
+
+        if (eliminated)
+        {
+            SetText(
+                spectatorStatusText,
+                spectatorController != null
+                    ? spectatorController.CurrentStatusText
+                    : "KHÔNG CÒN HIDER ĐỂ THEO DÕI");
+        }
+    }
+
+    private void UpdateHealthBar()
+    {
+        if (hiderHealth == null)
+        {
+            return;
+        }
+
+        UpdateHealthBar(hiderHealth.CurrentHealth, hiderHealth.MaxHealth);
+    }
+
+    private void UpdateHealthBar(int currentHealth, int maxHealth)
+    {
+        int safeMaxHealth = Mathf.Max(1, maxHealth);
+        int safeCurrentHealth = Mathf.Clamp(currentHealth, 0, safeMaxHealth);
+        float normalizedHealth = safeCurrentHealth / (float)safeMaxHealth;
+
+        SetFill(hiderHealthFill, normalizedHealth);
+        if (hiderHealthFill != null)
+        {
+            hiderHealthFill.color = GetHealthColor(normalizedHealth);
+        }
+
+        SetText(hiderHealthText, $"{safeCurrentHealth} / {safeMaxHealth}");
+    }
+
+    private static Color GetHealthColor(float normalizedHealth)
+    {
+        if (normalizedHealth <= 0.3f)
+        {
+            return CriticalColor;
+        }
+
+        if (normalizedHealth <= 0.6f)
+        {
+            return Color.Lerp(CriticalColor, WarningColor, Mathf.InverseLerp(0.3f, 0.6f, normalizedHealth));
+        }
+
+        return Color.Lerp(WarningColor, HealthyColor, Mathf.InverseLerp(0.6f, 1f, normalizedHealth));
     }
 
     private static string FormatTime(float seconds)

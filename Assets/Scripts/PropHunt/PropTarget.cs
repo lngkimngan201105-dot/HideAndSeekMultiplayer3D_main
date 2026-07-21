@@ -12,6 +12,9 @@ public class PropVisualPartData
 
 public class PropTarget : MonoBehaviour
 {
+    [SerializeField]
+    private bool gameplayEnabled = true;
+
     public string propId;
     public string displayName;
     public GameObject visualPrefab;
@@ -19,4 +22,11 @@ public class PropTarget : MonoBehaviour
     public Vector3 visualOffset;
     public Vector3 visualRotationOffset;
     public float visualScale = 1f;
+
+    public bool GameplayEnabled => gameplayEnabled;
+
+    public void SetGameplayEnabled(bool enabled)
+    {
+        gameplayEnabled = enabled;
+    }
 }

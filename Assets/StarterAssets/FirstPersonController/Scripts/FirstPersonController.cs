@@ -58,6 +58,7 @@ namespace StarterAssets
 		private float _speed;
 		private float _rotationVelocity;
 		private float _verticalVelocity;
+		private Vector3 _externalHorizontalVelocity;
 		private float _terminalVelocity = 53.0f;
 
 		// timeout deltatime
@@ -71,6 +72,12 @@ namespace StarterAssets
 		private CharacterController _controller;
 		private StarterAssetsInputs _input;
 		private GameObject _mainCamera;
+		private Transform _disguisedMovementCamera;
+		private bool _useDisguisedCameraRelativeMovement;
+		private Vector3 _lastValidGroundForward;
+		private Vector3 _lastValidGroundRight;
+		public bool IsControlLocked { get; private set; }
+		public bool IsCameraLookLocked { get; private set; }
 
 		private const float _threshold = 0.01f;
 
@@ -133,6 +140,12 @@ namespace StarterAssets
 
 		private void Update()
 		{
+			if (IsControlLocked)
+			{
+				GroundedCheck();
+				return;
+			}
+
 			JumpAndGravity();
 			GroundedCheck();
 			Move();
@@ -140,7 +153,58 @@ namespace StarterAssets
 
 		private void LateUpdate()
 		{
+			if (IsControlLocked || IsCameraLookLocked)
+			{
+				return;
+			}
+
 			CameraRotation();
+		}
+
+		public void SetControlLocked(bool locked)
+		{
+			IsControlLocked = locked;
+			_speed = 0f;
+			_rotationVelocity = 0f;
+			_verticalVelocity = 0f;
+			_externalHorizontalVelocity = Vector3.zero;
+
+			if (_input != null)
+			{
+				_input.move = Vector2.zero;
+				_input.look = Vector2.zero;
+				_input.jump = false;
+				_input.sprint = false;
+			}
+		}
+
+		public void SetCameraLookLocked(bool locked)
+		{
+			IsCameraLookLocked = locked;
+		}
+
+		public void SetDisguisedCameraRelativeMovement(Camera gameplayCamera, bool enabled)
+		{
+			_useDisguisedCameraRelativeMovement = enabled && gameplayCamera != null;
+			_disguisedMovementCamera = _useDisguisedCameraRelativeMovement
+				? gameplayCamera.transform
+				: null;
+
+			if (_useDisguisedCameraRelativeMovement)
+			{
+				UpdateGroundMovementBasis();
+			}
+			else
+			{
+				_lastValidGroundForward = Vector3.zero;
+				_lastValidGroundRight = Vector3.zero;
+			}
+		}
+
+		public void ApplyExternalVelocity(Vector3 velocity)
+		{
+			_externalHorizontalVelocity = new Vector3(velocity.x, 0f, velocity.z);
+			_verticalVelocity = Mathf.Max(_verticalVelocity, velocity.y);
 		}
 
 		private void GroundedCheck()
@@ -218,19 +282,84 @@ namespace StarterAssets
 				_speed = targetSpeed;
 			}
 
-			// normalise input direction
-			Vector3 inputDirection = new Vector3(_input.move.x, 0.0f, _input.move.y).normalized;
-
-			// note: Vector2's != operator uses approximation so is not floating point error prone, and is cheaper than magnitude
-			// if there is a move input rotate player when the player is moving
-			if (_input.move != Vector2.zero)
-			{
-				// move
-				inputDirection = transform.right * _input.move.x + transform.forward * _input.move.y;
-			}
+			Vector3 inputDirection = GetGroundMovementDirection(_input.move);
 
 			// move the player
-			_controller.Move(inputDirection.normalized * (_speed * Time.deltaTime) + new Vector3(0.0f, _verticalVelocity, 0.0f) * Time.deltaTime);
+			Vector3 movementVelocity =
+				inputDirection.normalized * _speed +
+				_externalHorizontalVelocity +
+				new Vector3(0.0f, _verticalVelocity, 0.0f);
+			_controller.Move(movementVelocity * Time.deltaTime);
+			_externalHorizontalVelocity = Vector3.MoveTowards(
+				_externalHorizontalVelocity,
+				Vector3.zero,
+				8f * Time.deltaTime
+			);
+		}
+
+		private Vector3 GetGroundMovementDirection(Vector2 moveInput)
+		{
+			if (moveInput == Vector2.zero)
+			{
+				return Vector3.zero;
+			}
+
+			if (!_useDisguisedCameraRelativeMovement || _disguisedMovementCamera == null)
+			{
+				return (
+					transform.right * moveInput.x +
+					transform.forward * moveInput.y
+				).normalized;
+			}
+
+			UpdateGroundMovementBasis();
+			Vector3 movementDirection =
+				_lastValidGroundForward * moveInput.y +
+				_lastValidGroundRight * moveInput.x;
+			return movementDirection.sqrMagnitude > 1f
+				? movementDirection.normalized
+				: movementDirection;
+		}
+
+		private void UpdateGroundMovementBasis()
+		{
+			if (_disguisedMovementCamera == null)
+			{
+				return;
+			}
+
+			Vector3 cameraForward = Vector3.ProjectOnPlane(
+				_disguisedMovementCamera.forward,
+				Vector3.up
+			);
+			Vector3 cameraRight = Vector3.ProjectOnPlane(
+				_disguisedMovementCamera.right,
+				Vector3.up
+			);
+
+			if (cameraForward.sqrMagnitude > _threshold)
+			{
+				_lastValidGroundForward = cameraForward.normalized;
+			}
+			else if (_lastValidGroundForward.sqrMagnitude <= _threshold)
+			{
+				Vector3 capsuleForward = Vector3.ProjectOnPlane(transform.forward, Vector3.up);
+				_lastValidGroundForward = capsuleForward.sqrMagnitude > _threshold
+					? capsuleForward.normalized
+					: Vector3.forward;
+			}
+
+			if (cameraRight.sqrMagnitude > _threshold)
+			{
+				_lastValidGroundRight = cameraRight.normalized;
+			}
+			else if (_lastValidGroundRight.sqrMagnitude <= _threshold)
+			{
+				_lastValidGroundRight = Vector3.Cross(
+					Vector3.up,
+					_lastValidGroundForward
+				).normalized;
+			}
 		}
 
 		private void JumpAndGravity()
