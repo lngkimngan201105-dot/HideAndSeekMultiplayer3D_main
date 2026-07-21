@@ -171,6 +171,7 @@ public class PropHuntTestRoleSelector : MonoBehaviour
     {
         if (!initialSpawnCompleted) return;
 
+        RestoreGameplayAfterRoleSelection();
         CurrentRole = PropHuntTestRole.Hider;
         SetSeekerGameplayActive(false);
         hiderElimination?.SetSpectatorSuppressed(false);
@@ -211,6 +212,7 @@ public class PropHuntTestRoleSelector : MonoBehaviour
             hiderTransformSystem.ForceExitGhostCamera();
         }
 
+        RestoreGameplayAfterRoleSelection();
         CurrentRole = PropHuntTestRole.Seeker;
         SetPanelVisible(false);
         SetCursor(true);
@@ -264,6 +266,14 @@ public class PropHuntTestRoleSelector : MonoBehaviour
         ApplyHealthBarVisibility(PropHuntTestRole.None);
         ActivateHiderPreviewCamera();
         SetCameraActive(seekerCamera, false);
+    }
+
+    private static void RestoreGameplayAfterRoleSelection()
+    {
+        // The main menu pauses the game. Ensure a role can never inherit that
+        // paused state, including after an in-editor script/domain reload.
+        Map2RuntimeBootstrap.CloseRuntimeMenusForGameplay();
+        Time.timeScale = 1f;
     }
 
     private void SetSeekerGameplayActive(bool active)

@@ -18,6 +18,24 @@ public class Map2RuntimeBootstrap : MonoBehaviour
     private GameObject _menuRoot;
     private PropHuntRoundManager _roundManager;
 
+    /// <summary>
+    /// Restores gameplay after a role is selected.  This intentionally closes every
+    /// runtime copy of the menu, because Unity can retain an older runtime canvas
+    /// after a script reload while in Play Mode.
+    /// </summary>
+    public static void CloseRuntimeMenusForGameplay()
+    {
+        Time.timeScale = 1f;
+
+        foreach (Canvas canvas in FindObjectsOfType<Canvas>(true))
+        {
+            if (canvas != null && canvas.gameObject.name == "Map2MainMenuCanvas")
+            {
+                canvas.gameObject.SetActive(false);
+            }
+        }
+    }
+
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
     private static void RegisterSceneHook()
     {
@@ -236,19 +254,17 @@ public class Map2RuntimeBootstrap : MonoBehaviour
 
     private void StartMatch()
     {
-        Time.timeScale = 1f;
+        CloseRuntimeMenusForGameplay();
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
-
-        if (_menuRoot != null)
-        {
-            _menuRoot.SetActive(false);
-        }
 
         if (_roundManager != null)
         {
             _roundManager.RestartRound();
         }
+
+        PropHuntTestRoleSelector roleSelector = FindObjectOfType<PropHuntTestRoleSelector>(true);
+        roleSelector?.ShowRoleSelection();
 
         PlayMusic(_matchMusic, 0.38f);
     }
