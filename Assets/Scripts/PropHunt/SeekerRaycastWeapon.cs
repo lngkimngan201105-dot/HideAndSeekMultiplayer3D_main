@@ -10,7 +10,8 @@ public enum SeekerShotResult
     Miss,
     World,
     Clone,
-    Hider
+    Hider,
+    ValidDisguiseProp
 }
 
 public class SeekerRaycastWeapon : MonoBehaviour
@@ -23,6 +24,7 @@ public class SeekerRaycastWeapon : MonoBehaviour
     [SerializeField] private Renderer[] pulseRenderers = Array.Empty<Renderer>();
     [SerializeField] private SeekerWeaponEnergy weaponEnergy;
     [SerializeField] private SeekerWeaponPresentation weaponPresentation;
+    [SerializeField] private SeekerHealth seekerHealth;
 
     [Header("Pulse Tagger Raycast")]
     [SerializeField, Min(0.1f)] private float range = 50f;
@@ -31,6 +33,8 @@ public class SeekerRaycastWeapon : MonoBehaviour
     [SerializeField] private LayerMask hitMask = Physics.DefaultRaycastLayers;
     [SerializeField] private bool allowDebugWeaponDuringPreparation = true;
     [SerializeField] private bool showWeaponDebugLogs;
+    [SerializeField] private bool acceptPlayerInput = true;
+    [SerializeField, Min(1)] private int wrongPropPenalty = 5;
     [SerializeField, Range(0.15f, 0.25f)] private float roleSelectionFireBlock = 0.2f;
 
     private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
@@ -100,7 +104,7 @@ public class SeekerRaycastWeapon : MonoBehaviour
     private void Update()
     {
         UpdateFeedback();
-        if (!weaponActive)
+        if (!weaponActive || !acceptPlayerInput)
         {
             return;
         }
@@ -163,6 +167,12 @@ public class SeekerRaycastWeapon : MonoBehaviour
         }
     }
 
+    public void SetPlayerInputEnabled(bool enabled)
+    {
+        acceptPlayerInput = enabled;
+        requireFireRelease = enabled && IsFireHeld();
+    }
+
     public void ConfigureEnergyAndPresentation(
         SeekerWeaponEnergy configuredEnergy,
         SeekerWeaponPresentation configuredPresentation)
@@ -185,8 +195,34 @@ public class SeekerRaycastWeapon : MonoBehaviour
 
     public bool TryFireRay(Ray ray, bool ignoreCooldownForValidation)
     {
+        return TryFireRayInternal(ray, ignoreCooldownForValidation, false);
+    }
+
+    public bool TryFireFromAI(Vector3 origin, Vector3 direction)
+    {
+        if (direction.sqrMagnitude < 0.000001f)
+        {
+            return false;
+        }
+
+        return TryFireRayInternal(new Ray(origin, direction.normalized), false, true);
+    }
+
+    public bool TryFireRayFromAI(Ray ray, bool ignoreCooldownForValidation = false)
+    {
+        return TryFireRayInternal(ray, ignoreCooldownForValidation, true);
+    }
+
+    private bool TryFireRayInternal(Ray ray, bool ignoreCooldownForValidation, bool aiRequest)
+    {
         float now = Time.realtimeSinceStartup;
         if (!weaponActive || (!ignoreCooldownForValidation && now < nextShotAt))
+        {
+            return false;
+        }
+
+        if (aiRequest && (roundManager == null ||
+                          roundManager.CurrentState != PropHuntRoundState.Hunting))
         {
             return false;
         }
@@ -214,24 +250,33 @@ public class SeekerRaycastWeapon : MonoBehaviour
         {
             if (hit.collider == null || IsOwnedBySeeker(hit.collider)) continue;
 
-            HiderCloneInstance clone = hit.collider.GetComponentInParent<HiderCloneInstance>();
-            if (clone != null)
+            SeekerShotResult classification = SeekerShotTargetClassifier.Classify(hit.collider);
+            if (classification == SeekerShotResult.Clone)
             {
                 weaponPresentation?.SpawnImpact(hit);
+                HiderCloneInstance clone = hit.collider.GetComponentInParent<HiderCloneInstance>();
                 clone.ReceiveHit(gameObject);
                 ResolveShot(SeekerShotResult.Clone, hit.collider);
                 return true;
             }
 
-            HiderHealth hiderHealth = hit.collider.GetComponentInParent<HiderHealth>();
-            if (hiderHealth != null)
+            if (classification == SeekerShotResult.Hider)
             {
                 weaponPresentation?.SpawnImpact(hit);
+                HiderHealth hiderHealth = hit.collider.GetComponentInParent<HiderHealth>();
                 if (hiderHealth.IsAlive)
                 {
                     hiderHealth.TakeDamage(damage, HiderDamageSource.SeekerWeapon);
                 }
                 ResolveShot(SeekerShotResult.Hider, hit.collider);
+                return true;
+            }
+
+            if (classification == SeekerShotResult.ValidDisguiseProp)
+            {
+                weaponPresentation?.SpawnImpact(hit);
+                seekerHealth?.TakeDamage(wrongPropPenalty);
+                ResolveShot(SeekerShotResult.ValidDisguiseProp, hit.collider);
                 return true;
             }
 
@@ -286,6 +331,9 @@ public class SeekerRaycastWeapon : MonoBehaviour
             case SeekerShotResult.Hider:
                 feedbackColor = Color.white;
                 break;
+            case SeekerShotResult.ValidDisguiseProp:
+                feedbackColor = new Color(1f, 0.35f, 0.12f, 1f);
+                break;
             default:
                 feedbackColor = new Color(0.1f, 0.65f, 0.8f, 1f);
                 break;
@@ -297,7 +345,8 @@ public class SeekerRaycastWeapon : MonoBehaviour
         {
             Debug.Log(
                 $"Seeker Shot: Hit={(hitCollider != null ? hitCollider.name : "None")}, " +
-                $"Type={result}, Damage={(result == SeekerShotResult.Hider ? damage : 0)}");
+                $"Type={result}, HiderDamage={(result == SeekerShotResult.Hider ? damage : 0)}, " +
+                $"SeekerPenalty={(result == SeekerShotResult.ValidDisguiseProp ? wrongPropPenalty : 0)}");
         }
     }
 
@@ -308,6 +357,7 @@ public class SeekerRaycastWeapon : MonoBehaviour
         if (roundManager == null) roundManager = FindObjectOfType<PropHuntRoundManager>(true);
         if (weaponEnergy == null) weaponEnergy = GetComponentInParent<SeekerWeaponEnergy>(true);
         if (weaponPresentation == null) weaponPresentation = GetComponentInParent<SeekerWeaponPresentation>(true);
+        if (seekerHealth == null) seekerHealth = GetComponentInParent<SeekerHealth>(true);
         SeekerFirstPersonController owner = GetComponentInParent<SeekerFirstPersonController>(true);
         seekerOwnerRoot = owner != null ? owner.transform : transform.root;
     }

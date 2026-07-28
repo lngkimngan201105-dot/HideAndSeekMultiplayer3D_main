@@ -17,6 +17,7 @@ public enum HiderControlState
 public class PropTransformSystem : MonoBehaviour
 {
     public event Action VisualChanged;
+    public event Action<bool> DisguiseChanged;
     public event Action<bool> EliminationChanged;
 
     [Header("Role")]
@@ -380,6 +381,7 @@ public class PropTransformSystem : MonoBehaviour
         if (applied)
         {
             VisualChanged?.Invoke();
+            DisguiseChanged?.Invoke(true);
         }
 
         return applied;
@@ -672,7 +674,12 @@ public class PropTransformSystem : MonoBehaviour
             cameraModeManager.SetPropTarget(_currentPropVisual.transform);
         }
 
-        SetCamera(PlayerCameraMode.PropTPS);
+        DisguiseChanged?.Invoke(true);
+        if (cameraModeManager == null ||
+            !cameraModeManager.SinglePlayerHiderCameraMode)
+        {
+            SetCamera(PlayerCameraMode.PropTPS);
+        }
 
         Vector3 playerAfter = transform.position;
         Debug.Log($"Player before copy: {playerBefore}");
@@ -822,6 +829,7 @@ public class PropTransformSystem : MonoBehaviour
 
     private void BecomeHuman(bool log)
     {
+        bool disguiseWasActive = IsDisguised;
         ForceExitGhostCamera();
         ForceDetachFromWall();
 
@@ -843,7 +851,19 @@ public class PropTransformSystem : MonoBehaviour
         currentPropId = string.Empty;
         currentState = PlayerDisguiseState.Human;
         SetFirstPersonControllerEnabled(true);
-        SetCamera(PlayerCameraMode.HumanFPS);
+        if (disguiseWasActive)
+        {
+            DisguiseChanged?.Invoke(false);
+        }
+        if (cameraModeManager == null ||
+            !cameraModeManager.SinglePlayerHiderCameraMode)
+        {
+            SetCamera(PlayerCameraMode.HumanFPS);
+        }
+        else if (!disguiseWasActive)
+        {
+            cameraModeManager.ApplyResolvedHiderCameraMode();
+        }
         VisualChanged?.Invoke();
 
         if (log)
@@ -1948,14 +1968,16 @@ public class PropTransformSystem : MonoBehaviour
                playerRole == PlayerRole.Hider &&
                !IsEliminated &&
                !IsChangingModel &&
-               currentState == PlayerDisguiseState.Disguised &&
+               (currentState == PlayerDisguiseState.Human ||
+                currentState == PlayerDisguiseState.Disguised) &&
                (roundManager == null || roundManager.IsAbilityPhaseActive());
     }
 
     private bool CanRemainInGhostCamera()
     {
         return !IsEliminated &&
-               currentState == PlayerDisguiseState.Disguised &&
+               (currentState == PlayerDisguiseState.Human ||
+                currentState == PlayerDisguiseState.Disguised) &&
                (roundManager == null || roundManager.IsAbilityPhaseActive());
     }
 
@@ -2030,8 +2052,14 @@ public class PropTransformSystem : MonoBehaviour
 
         if (cameraModeManager != null)
         {
-            cameraModeManager.SetMode(_cameraModeBeforeGhost);
-            if (_cameraModeBeforeGhost == PlayerCameraMode.PropTPS)
+            PlayerCameraMode returnMode = IsEliminated ||
+                                          currentState == PlayerDisguiseState.Spectator
+                ? PlayerCameraMode.Spectator
+                : IsDisguised
+                    ? PlayerCameraMode.PropTPS
+                    : PlayerCameraMode.HumanFPS;
+            cameraModeManager.SetMode(returnMode);
+            if (returnMode == PlayerCameraMode.PropTPS)
             {
                 cameraModeManager.RefreshCurrentPropCamera();
                 cameraModeManager.ForceCameraToSafePosition();

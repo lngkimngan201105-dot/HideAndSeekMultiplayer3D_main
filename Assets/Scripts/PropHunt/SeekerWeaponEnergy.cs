@@ -18,6 +18,7 @@ public class SeekerWeaponEnergy : MonoBehaviour
     [SerializeField] private SeekerWeaponEnergyState state = SeekerWeaponEnergyState.Ready;
     [SerializeField] private PropHuntTestRoleSelector roleSelector;
     [SerializeField] private SeekerRaycastWeapon weapon;
+    [SerializeField] private bool acceptPlayerReloadInput = true;
 
     private float reloadElapsed;
     private float reloadProgress = 1f;
@@ -88,7 +89,7 @@ public class SeekerWeaponEnergy : MonoBehaviour
     private void Update()
     {
         TickReload(Time.unscaledDeltaTime);
-        if (WasReloadPressed()) TryStartReload();
+        if (acceptPlayerReloadInput && WasReloadPressed()) TryStartReload();
     }
 
     public void Configure(PropHuntTestRoleSelector configuredRoleSelector, SeekerRaycastWeapon configuredWeapon)
@@ -113,7 +114,22 @@ public class SeekerWeaponEnergy : MonoBehaviour
 
     public bool TryStartReload()
     {
-        if (!CanStartReload()) return false;
+        return TryStartReloadInternal(false);
+    }
+
+    public bool TryStartReloadFromAI()
+    {
+        return TryStartReloadInternal(true);
+    }
+
+    public void SetPlayerReloadInputEnabled(bool enabled)
+    {
+        acceptPlayerReloadInput = enabled;
+    }
+
+    private bool TryStartReloadInternal(bool aiRequest)
+    {
+        if (!CanStartReload(aiRequest)) return false;
 
         state = SeekerWeaponEnergyState.Reloading;
         reloadElapsed = 0f;
@@ -144,15 +160,22 @@ public class SeekerWeaponEnergy : MonoBehaviour
     }
 #endif
 
-    private bool CanStartReload()
+    private bool CanStartReload(bool aiRequest)
     {
         if (!enabled || !gameObject.activeInHierarchy || state != SeekerWeaponEnergyState.Ready ||
             currentCharges >= maxCharges)
             return false;
-        if (roleSelector == null || roleSelector.CurrentControlledRole != PropHuntTestRole.Seeker ||
-            roleSelector.IsRoleSelectionPanelOpen)
+        if (!aiRequest &&
+            (roleSelector == null || roleSelector.CurrentControlledRole != PropHuntTestRole.Seeker ||
+             roleSelector.IsRoleSelectionPanelOpen))
             return false;
-        return weapon != null && weapon.enabled && weapon.gameObject.activeInHierarchy && weapon.IsWeaponActive;
+        if (aiRequest)
+        {
+            return weapon != null && weapon.IsWeaponActive;
+        }
+
+        return weapon != null && weapon.enabled &&
+               weapon.gameObject.activeInHierarchy && weapon.IsWeaponActive;
     }
 
     private void TickReload(float deltaTime)

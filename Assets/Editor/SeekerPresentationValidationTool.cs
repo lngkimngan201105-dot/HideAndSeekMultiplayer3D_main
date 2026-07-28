@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Animations.Rigging;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using Object = UnityEngine.Object;
@@ -73,6 +74,14 @@ public static class SeekerPresentationValidationTool
         GameObject worldMuzzlePoint = FindNamed(scene, "MuzzlePoint_World");
         GameObject rightHandGrip = FindNamed(scene, "RightHandGrip");
         GameObject leftHandGrip = FindNamed(scene, "LeftHandGrip");
+        GameObject weaponRigObject = FindNamed(scene, "WeaponRig");
+        GameObject rightArmIkObject = FindNamed(scene, "RightArmIK");
+        GameObject leftArmIkObject = FindNamed(scene, "LeftArmIK");
+        GameObject upperBodyAimObject = FindNamed(scene, "UpperBodyAim");
+        GameObject leftElbowHint = FindNamed(scene, "LeftElbowHint");
+        GameObject rightElbowHint = FindNamed(scene, "RightElbowHint");
+        GameObject rightHandIkTarget = FindNamed(scene, "RightHandIKTarget");
+        GameObject aiAimTarget = FindNamed(scene, "SeekerAIAimTarget");
         GameObject pulseFallback = FindNamed(scene, "PulseTaggerVisual");
         GameObject energyBar = FindNamed(scene, "SeekerWeaponEnergyBar");
         GameObject energyText = FindNamed(scene, "EnergyText");
@@ -89,6 +98,15 @@ public static class SeekerPresentationValidationTool
         Require(CountNamed(scene, "MuzzlePoint_World") == 1, "World MuzzlePoint_World is missing or duplicated.", failures);
         Require(CountNamed(scene, "RightHandGrip") == 1 && CountNamed(scene, "LeftHandGrip") == 1,
             "World gun grip markers are missing or duplicated.", failures);
+        Require(CountNamed(scene, "WeaponRig") == 1 &&
+                CountNamed(scene, "RightArmIK") == 1 &&
+                CountNamed(scene, "LeftArmIK") == 1 &&
+                CountNamed(scene, "UpperBodyAim") == 1 &&
+                CountNamed(scene, "LeftElbowHint") == 1 &&
+                CountNamed(scene, "RightElbowHint") == 1 &&
+                CountNamed(scene, "RightHandIKTarget") == 1 &&
+                CountNamed(scene, "SeekerAIAimTarget") == 1,
+            "Weapon rig, constraint, target or hint objects are missing/duplicated.", failures);
         Require(cyber != null && cyber.activeSelf, "CyberSoldierModel must be active.", failures);
         CyberSoldierAnimationEventReceiver[] footstepReceivers =
             cyber != null ? cyber.GetComponentsInChildren<CyberSoldierAnimationEventReceiver>(true) : Array.Empty<CyberSoldierAnimationEventReceiver>();
@@ -130,8 +148,24 @@ public static class SeekerPresentationValidationTool
         Transform leftHand = animator != null && animator.isHuman
             ? animator.GetBoneTransform(HumanBodyBones.LeftHand)
             : null;
-        Require(animator != null && animator.isHuman && !animator.applyRootMotion,
-            "Cyber Soldier must use its Humanoid Animator with Apply Root Motion disabled.", failures);
+        Transform chest = animator != null && animator.isHuman
+            ? animator.GetBoneTransform(HumanBodyBones.Chest)
+            : null;
+        Transform leftUpperArm = animator != null && animator.isHuman
+            ? animator.GetBoneTransform(HumanBodyBones.LeftUpperArm)
+            : null;
+        Transform leftLowerArm = animator != null && animator.isHuman
+            ? animator.GetBoneTransform(HumanBodyBones.LeftLowerArm)
+            : null;
+        Transform rightUpperArm = animator != null && animator.isHuman
+            ? animator.GetBoneTransform(HumanBodyBones.RightUpperArm)
+            : null;
+        Transform rightLowerArm = animator != null && animator.isHuman
+            ? animator.GetBoneTransform(HumanBodyBones.RightLowerArm)
+            : null;
+        Require(animator != null && animator.isHuman && !animator.applyRootMotion &&
+                animator.cullingMode == AnimatorCullingMode.AlwaysAnimate,
+            "Cyber Soldier must use Humanoid, no Root Motion and Always Animate.", failures);
         Require(rightHand != null && worldPivot != null && worldPivot.transform.parent == rightHand,
             "World gun is not parented to Humanoid RightHand.", failures);
         Require(leftHand != null, "Humanoid LeftHand was not resolved.", failures);
@@ -147,13 +181,72 @@ public static class SeekerPresentationValidationTool
         AnimatorController animatorController = animator != null
             ? animator.runtimeAnimatorController as AnimatorController
             : null;
+        RigBuilder rigBuilder = animator != null ? animator.GetComponent<RigBuilder>() : null;
+        Rig weaponRig = weaponRigObject != null ? weaponRigObject.GetComponent<Rig>() : null;
+        TwoBoneIKConstraint rightArmIk =
+            rightArmIkObject != null ? rightArmIkObject.GetComponent<TwoBoneIKConstraint>() : null;
+        TwoBoneIKConstraint leftArmIk =
+            leftArmIkObject != null ? leftArmIkObject.GetComponent<TwoBoneIKConstraint>() : null;
+        MultiAimConstraint upperBodyAim =
+            upperBodyAimObject != null ? upperBodyAimObject.GetComponent<MultiAimConstraint>() : null;
         Require(gripController != null && gripController.Animator == animator &&
                 gripController.MovementSource == seeker?.GetComponent<CharacterController>() &&
                 gripController.RightHand == rightHand && gripController.LeftHand == leftHand &&
+                gripController.Chest == chest &&
                 gripController.WorldGunPivot == worldPivot?.transform &&
                 gripController.RightHandGrip == rightHandGrip?.transform &&
-                gripController.LeftHandGrip == leftHandGrip?.transform && gripController.LeftHandIkEnabled,
-            "SeekerWeaponGripController references or LeftHand IK are incomplete.", failures);
+                gripController.LeftHandGrip == leftHandGrip?.transform &&
+                gripController.RightHandIkTarget == rightHandIkTarget?.transform &&
+                gripController.ManualAlignmentVersion == 1 &&
+                gripController.WeaponRig == weaponRig &&
+                gripController.RightArmIk == rightArmIk &&
+                gripController.LeftArmIk == leftArmIk &&
+                gripController.UpperBodyAim == upperBodyAim &&
+                gripController.AIAimTarget == aiAimTarget?.transform &&
+                gripController.LeftHandIkEnabled,
+            "SeekerWeaponGripController manual-alignment/Animation-Rigging references are incomplete.", failures);
+        Require(rigBuilder != null && rigBuilder.layers.Count == 1 &&
+                rigBuilder.layers[0].active && rigBuilder.layers[0].rig == weaponRig,
+            "Cyber Animator must own one active RigBuilder layer referencing WeaponRig.", failures);
+        if (rightArmIk != null)
+        {
+            TwoBoneIKConstraintData data = rightArmIk.data;
+            Require(data.root == rightUpperArm && data.mid == rightLowerArm &&
+                    data.tip == rightHand && data.target == rightHandIkTarget?.transform &&
+                    data.hint == rightElbowHint?.transform &&
+                    Approximately(data.targetPositionWeight, 1f) &&
+                    Approximately(data.targetRotationWeight, 1f) &&
+                    Approximately(data.hintWeight, 1f) &&
+                    !data.maintainTargetPositionOffset &&
+                    !data.maintainTargetRotationOffset,
+                "RightArmIK bone chain, target, hint or absolute weights are invalid.", failures);
+        }
+        if (leftArmIk != null)
+        {
+            TwoBoneIKConstraintData data = leftArmIk.data;
+            Require(data.root == leftUpperArm && data.mid == leftLowerArm &&
+                    data.tip == leftHand && data.target == leftHandGrip?.transform &&
+                    data.hint == leftElbowHint?.transform &&
+                    Approximately(data.targetPositionWeight, 1f) &&
+                    Approximately(data.targetRotationWeight, 1f) &&
+                    Approximately(data.hintWeight, 1f) &&
+                    !data.maintainTargetPositionOffset &&
+                    !data.maintainTargetRotationOffset,
+                "LeftArmIK bone chain, LeftHandGrip target, hint or absolute weights are invalid.", failures);
+        }
+        if (upperBodyAim != null)
+        {
+            MultiAimConstraintData data = upperBodyAim.data;
+            Require(data.constrainedObject == chest &&
+                    data.sourceObjects.Count == 1 &&
+                    data.sourceObjects[0].transform == aiAimTarget?.transform &&
+                    Approximately(data.sourceObjects[0].weight, 1f) &&
+                    data.maintainOffset &&
+                    data.worldUpType == MultiAimConstraintData.WorldUpType.SceneUp &&
+                    data.constrainedXAxis && data.constrainedYAxis &&
+                    !data.constrainedZAxis,
+                "UpperBodyAim chest/source/axis configuration is invalid.", failures);
+        }
         Require(animatorController != null &&
                 AssetDatabase.GetAssetPath(animatorController) == SeekerPresentationSetupTool.SeekerHoldControllerPath &&
                 animatorController.layers.Length > 0 && animatorController.layers[0].iKPass,
@@ -169,10 +262,35 @@ public static class SeekerPresentationValidationTool
             }
         }
 
-        Bounds worldGunBounds = CalculateWorldBounds(worldGun);
+        Bounds worldGunBounds = default;
+        string worldGunDiagnostic = "World gun root is missing.";
+        bool hasRobustWorldBounds = worldGun != null &&
+                                    SeekerPresentationSetupTool.TryCalculateVisualBounds(
+                                        worldGun, out worldGunBounds,
+                                        out worldGunDiagnostic);
+        Require(hasRobustWorldBounds,
+            "World gun has no robust measurable visual bounds.\n" + worldGunDiagnostic, failures);
+        Mesh[] worldMeshes = worldGun != null
+            ? worldGun.GetComponentsInChildren<MeshFilter>(true)
+                .Select(filter => filter.sharedMesh)
+                .Concat(worldGun.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                    .Select(renderer => renderer.sharedMesh))
+                .Where(mesh => mesh != null)
+                .ToArray()
+            : Array.Empty<Mesh>();
+        Require(worldMeshes.Any(mesh => mesh.vertexCount > 0),
+            "World gun has no real mesh with vertexCount > 0.", failures);
         float worldGunMaxDimension = Mathf.Max(worldGunBounds.size.x, worldGunBounds.size.y, worldGunBounds.size.z);
         Require(worldGunMaxDimension >= 0.80f && worldGunMaxDimension <= 1.00f,
             $"World gun max dimension must be 0.80-1.00 m, got {worldGunMaxDimension:F3} m.", failures);
+        float muzzleForwardProjection = worldMuzzlePoint != null && worldGun != null
+            ? Vector3.Dot(
+                worldMuzzlePoint.transform.position - worldGunBounds.center,
+                worldGun.transform.forward)
+            : float.NegativeInfinity;
+        Require(muzzleForwardProjection >= worldGunMaxDimension * 0.35f,
+            $"MuzzlePoint_World is not at the barrel tip (forward projection={muzzleForwardProjection:F3} m).",
+            failures);
         Require(seeker != null && worldGunBounds.min.y >= seeker.transform.position.y - 0.05f,
             $"World gun clips below Seeker ground: minY={worldGunBounds.min.y:F3}.", failures);
         Require(fpsGun != null && worldGun != null && fpsGun.transform != worldGun.transform &&
@@ -314,7 +432,11 @@ public static class SeekerPresentationValidationTool
         ValidateShaders(fpsGun, failures);
         ValidateShaders(worldGun, failures);
         if (presentation?.ImpactPrefab != null) ValidateShaders(presentation.ImpactPrefab, failures);
-        if (presentation?.ImpactPrefab != null) ValidateIsolatedImpactRender(presentation.ImpactPrefab, failures);
+        // Camera.Render on Unity's NullGfxDevice can crash natively for the
+        // package's 8192px particle texture. The same proof remains enabled in
+        // an interactive Editor where a real graphics device exists.
+        if (presentation?.ImpactPrefab != null && !Application.isBatchMode)
+            ValidateIsolatedImpactRender(presentation.ImpactPrefab, failures);
         Require(seeker != null && seeker.GetComponentsInChildren<AudioListener>(true).Length == 1,
             "Seeker hierarchy should retain exactly its existing camera AudioListener.", failures);
 
@@ -377,7 +499,7 @@ public static class SeekerPresentationValidationTool
             if (string.IsNullOrEmpty(result))
                 Debug.Log("[SeekerPresentationValidation] PLAY MODE PASS — 50 cycles / 250 shots / 50 reloads; " +
                           "energyEvents=300, reloadStateEvents=100; " +
-                          "early reloads, R spam, F1/F2, role panel, round reset, disable recovery, IK and live Impact02 verified.");
+                          "early reloads, reload spam, single-player Hider ownership, round reset, disable recovery, IK and live Impact02 verified.");
             else
                 Debug.LogError("[SeekerPresentationValidation] PLAY MODE FAIL\n" + result);
             if (commandLine && Application.isBatchMode) EditorApplication.Exit(string.IsNullOrEmpty(result) ? 0 : 1);
@@ -394,13 +516,21 @@ public static class SeekerPresentationValidationTool
             smokeEnergy = Object.FindObjectOfType<SeekerWeaponEnergy>(true);
             smokePresentation = Object.FindObjectOfType<SeekerWeaponPresentation>(true);
             smokeEnergyHud = Object.FindObjectOfType<SeekerWeaponEnergyBarController>(true);
+            PropHuntRoundManager round =
+                Object.FindObjectOfType<PropHuntRoundManager>(true);
             Require(smokeSelector != null && smokeWeapon != null && smokeEnergy != null && smokePresentation != null && smokeEnergyHud != null,
                 "Required Seeker presentation components are missing in Play Mode.", SmokeFailures);
+            Require(round != null, "PropHuntRoundManager is missing in Play Mode.", SmokeFailures);
             if (SmokeFailures.Count > 0) { FinishSmoke(); return; }
 
-            smokeSelector.SelectInitialSeekerRole();
-            Require(smokeSelector.CurrentControlledRole == PropHuntTestRole.Seeker && smokeWeapon.IsWeaponActive,
-                "Could not possess the Seeker for stress test.", SmokeFailures);
+            round.BeginHunting();
+            Require(smokeSelector.SinglePlayerHiderMode &&
+                    smokeSelector.CurrentControlledRole == PropHuntTestRole.Hider &&
+                    (smokeSelector.RoleSelectionPanel == null ||
+                     !smokeSelector.RoleSelectionPanel.activeSelf) &&
+                    smokeWeapon.IsWeaponActive,
+                "Single-player Hider ownership or AI weapon activation is invalid.",
+                SmokeFailures);
             smokeEnergy.ResetForRound();
             Require(smokeEnergyHud.SegmentFills.Length == 5 && smokeEnergyHud.SegmentFills.All(fill => fill != null) &&
                     smokeEnergyHud.SegmentFills.Distinct().Count() == 5 &&
@@ -432,7 +562,7 @@ public static class SeekerPresentationValidationTool
 
             for (int shot = 0; shot < 5; shot++) smokeEnergy.TryConsumeShot();
             RequireEnergySegments(0f, "empty energy");
-            Require(smokeEnergy.TryStartReload(), "Could not start smooth five-segment reload validation.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), "Could not start smooth five-segment reload validation.", SmokeFailures);
             for (int step = 1; step <= 10; step++)
             {
                 smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration / 10f);
@@ -441,7 +571,7 @@ public static class SeekerPresentationValidationTool
             smokeEnergy.ResetForRound();
             smokeEnergy.TryConsumeShot();
             smokeEnergy.TryConsumeShot();
-            Require(smokeEnergy.TryStartReload(), "Could not start partial-charge reload validation.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), "Could not start partial-charge reload validation.", SmokeFailures);
             smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration * 0.45f);
             RequireEnergySegments(3.9f, "reload from 3/5 at 45%");
             smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration);
@@ -467,12 +597,24 @@ public static class SeekerPresentationValidationTool
             expectedImpactPosition = expectedHit.point + expectedHit.normal * 0.02f;
             impactProofCameraPosition = camera.transform.position;
             impactProofCameraRotation = camera.transform.rotation;
-            impactProofBeforePixels = CaptureCameraPixels(camera, null);
+            impactProofBeforePixels = Application.isBatchMode
+                ? null
+                : CaptureCameraPixels(camera, null);
 
             smokeEnergy.ResetForRound();
             smokePresentation.SetImpactDebugLoggingForValidation(true);
-            Require(smokeWeapon.TryFireRay(ray, true), "Impact render-proof shot was rejected.", SmokeFailures);
+            Require(smokeWeapon.TryFireRayFromAI(ray, true), "Impact render-proof shot was rejected.", SmokeFailures);
             impactProofRay = ray;
+            if (Application.isBatchMode)
+            {
+                // NullGfxDevice cannot safely render the package's 8192px sheet.
+                // Runtime spawn, layer, hit point, pooling and gameplay checks
+                // continue below without invoking Camera.Render.
+                impactProofCaptureAt = Time.realtimeSinceStartup + 2f;
+                EditorApplication.update -= WaitForRigBeforeStress;
+                EditorApplication.update += WaitForRigBeforeStress;
+                return;
+            }
             // Batch-mode wall time and particle simulation time do not advance 1:1.
             // Use this as a safety deadline; WaitForImpactRenderProof samples the
             // actual ParticleSystem time at the sheet's highest-alpha phase.
@@ -485,6 +627,24 @@ public static class SeekerPresentationValidationTool
             SmokeFailures.Add(exception.ToString());
             FinishSmoke();
         }
+    }
+
+    private static void WaitForRigBeforeStress()
+    {
+        if (!EditorApplication.isPlaying)
+        {
+            EditorApplication.update -= WaitForRigBeforeStress;
+            return;
+        }
+
+        SeekerWeaponGripController grip =
+            Object.FindObjectOfType<SeekerWeaponGripController>(true);
+        if ((grip == null || grip.RigEvaluationCount <= 0) &&
+            Time.realtimeSinceStartup < impactProofCaptureAt)
+            return;
+
+        EditorApplication.update -= WaitForRigBeforeStress;
+        RunStressAfterImpactProof();
     }
 
     private static void WaitForImpactRenderProof()
@@ -540,7 +700,7 @@ public static class SeekerPresentationValidationTool
         {
             for (int shot = 0; shot < 5; shot++)
             {
-                Require(smokeWeapon.TryFireRay(impactProofRay, true),
+                Require(smokeWeapon.TryFireRayFromAI(impactProofRay, true),
                     $"Cycle {cycle + 1}, shot {shot + 1} was rejected.", SmokeFailures);
                 Require(smokeEnergy.CurrentCharges == 4 - shot,
                     $"Cycle {cycle + 1}, shot {shot + 1}: expected {4 - shot}/5, got {smokeEnergy.CurrentCharges}/5.", SmokeFailures);
@@ -548,13 +708,13 @@ public static class SeekerPresentationValidationTool
             }
 
             int feedbackAtEmpty = smokePresentation.ImpactFeedbackCount;
-            Require(!smokeWeapon.TryFireRay(impactProofRay, true),
+            Require(!smokeWeapon.TryFireRayFromAI(impactProofRay, true),
                 $"Cycle {cycle + 1} accepted a sixth shot at 0/5.", SmokeFailures);
             Require(smokePresentation.ImpactFeedbackCount == feedbackAtEmpty,
                 $"Cycle {cycle + 1} emitted an impact for an empty shot.", SmokeFailures);
-            Require(smokeEnergy.TryStartReload(), $"Cycle {cycle + 1} rejected reload.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), $"Cycle {cycle + 1} rejected reload.", SmokeFailures);
             for (int spam = 0; spam < 5; spam++)
-                Require(!smokeEnergy.TryStartReload(), $"Cycle {cycle + 1} R-spam restarted reload.", SmokeFailures);
+                Require(!smokeEnergy.TryStartReloadFromAI(), $"Cycle {cycle + 1} reload spam restarted reload.", SmokeFailures);
             smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration);
             Require(smokeEnergy.State == SeekerWeaponEnergyState.Ready &&
                     smokeEnergy.CurrentCharges == 5 && !smokeEnergy.HasActiveReload,
@@ -572,8 +732,14 @@ public static class SeekerPresentationValidationTool
         Require(stressEnergyEvents == 300 && stressReloadStateEvents == 100,
             $"Unexpected stress events: energy={stressEnergyEvents} (expected 300), reloadState={stressReloadStateEvents} (expected 100).",
             SmokeFailures);
-        Require(smokePresentation.MuzzleFlash != null && smokePresentation.MuzzleFlash.isPlaying,
-            "Muzzle particle did not play.", SmokeFailures);
+        ParticleSystem muzzle = smokePresentation.MuzzleFlash;
+        ParticleSystemRenderer muzzleRenderer =
+            muzzle != null ? muzzle.GetComponent<ParticleSystemRenderer>() : null;
+        Require(muzzle != null && muzzle.gameObject.activeInHierarchy &&
+                muzzle.emission.enabled &&
+                (muzzleRenderer == null || muzzleRenderer.enabled),
+            "Muzzle particle is not active and renderable after AI shot feedback.",
+            SmokeFailures);
         EditorApplication.update -= WaitForImpactValidation;
         EditorApplication.update += WaitForImpactValidation;
     }
@@ -614,22 +780,22 @@ public static class SeekerPresentationValidationTool
 
             int invalidImpactBaseline = smokePresentation.ImpactFeedbackCount;
             smokeEnergy.ResetForRound();
-            Require(smokeWeapon.TryFireRay(new Ray(Vector3.up * 10000f, Vector3.up), true),
+            Require(smokeWeapon.TryFireRayFromAI(new Ray(Vector3.up * 10000f, Vector3.up), true),
                 "A valid raycast miss was incorrectly rejected.", SmokeFailures);
             Require(smokePresentation.ImpactFeedbackCount == invalidImpactBaseline,
                 "Raycast miss incorrectly spawned Impact02.", SmokeFailures);
             smokeEnergy.ResetForRound();
-            Require(smokeWeapon.TryFireRay(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), true),
+            Require(smokeWeapon.TryFireRayFromAI(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), true),
                 "Could not prepare cooldown rejection test.", SmokeFailures);
             int cooldownImpactBaseline = smokePresentation.ImpactFeedbackCount;
-            Require(!smokeWeapon.TryFireRay(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), false) &&
+            Require(!smokeWeapon.TryFireRayFromAI(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), false) &&
                     smokePresentation.ImpactFeedbackCount == cooldownImpactBaseline,
                 "Cooldown-blocked shot spawned Impact02.", SmokeFailures);
             smokeEnergy.ResetForRound();
             smokeEnergy.TryConsumeShot();
-            Require(smokeEnergy.TryStartReload(), "Could not prepare reloading rejection test.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), "Could not prepare reloading rejection test.", SmokeFailures);
             int reloadingImpactBaseline = smokePresentation.ImpactFeedbackCount;
-            Require(!smokeWeapon.TryFireRay(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), true) &&
+            Require(!smokeWeapon.TryFireRayFromAI(new Ray(smokeSelector.SeekerCamera.transform.position, smokeSelector.SeekerCamera.transform.forward), true) &&
                     smokePresentation.ImpactFeedbackCount == reloadingImpactBaseline,
                 "Shot during Reloading spawned Impact02.", SmokeFailures);
             smokeEnergy.ResetForRound();
@@ -639,62 +805,62 @@ public static class SeekerPresentationValidationTool
                 smokeEnergy.ResetForRound();
                 for (int i = 0; i < 5 - targetCharges; i++)
                     Require(smokeEnergy.TryConsumeShot(), "Early reload preparation failed.", SmokeFailures);
-                Require(smokeEnergy.CurrentCharges == targetCharges && smokeEnergy.TryStartReload(),
+                Require(smokeEnergy.CurrentCharges == targetCharges && smokeEnergy.TryStartReloadFromAI(),
                     $"Early reload at {targetCharges}/5 was rejected.", SmokeFailures);
                 smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration);
                 Require(smokeEnergy.CurrentCharges == 5 && smokeEnergy.State == SeekerWeaponEnergyState.Ready,
                     $"Early reload at {targetCharges}/5 did not complete.", SmokeFailures);
             }
-            Require(!smokeEnergy.TryStartReload(), "Full 5/5 energy incorrectly accepted reload.", SmokeFailures);
+            Require(!smokeEnergy.TryStartReloadFromAI(), "Full 5/5 energy incorrectly accepted reload.", SmokeFailures);
 
-            smokeEnergy.TryConsumeShot();
             smokeSelector.ShowRoleSelection();
-            int panelImpactBaseline = smokePresentation.ImpactFeedbackCount;
-            Require(smokeSelector.IsRoleSelectionPanelOpen && !smokeEnergy.TryStartReload() &&
-                    !smokeEnergyHud.gameObject.activeInHierarchy &&
-                    !smokeWeapon.TryFireRay(new Ray(Vector3.zero, Vector3.forward), true) &&
-                    smokePresentation.ImpactFeedbackCount == panelImpactBaseline,
-                "Role panel did not block reload/fire/impact.", SmokeFailures);
-            smokeSelector.SelectInitialSeekerRole();
+            smokeSelector.PossessSeekerForDebug();
+            Require(smokeSelector.SinglePlayerHiderMode &&
+                    smokeSelector.CurrentControlledRole == PropHuntTestRole.Hider &&
+                    !smokeSelector.IsRoleSelectionPanelOpen &&
+                    (smokeSelector.RoleSelectionPanel == null ||
+                     !smokeSelector.RoleSelectionPanel.activeSelf) &&
+                    !smokeEnergyHud.gameObject.activeInHierarchy,
+                "Single-player mode allowed Role Panel or Seeker possession.",
+                SmokeFailures);
 
             smokeEnergy.ResetForRound();
             smokeEnergy.TryConsumeShot();
-            Require(smokeEnergy.TryStartReload(), "Could not start F1/F2 reload scenario.", SmokeFailures);
-            smokeSelector.PossessHiderForDebug();
-            Require(smokeSelector.CurrentControlledRole == PropHuntTestRole.Hider && smokeEnergy.IsReloading &&
-                    !smokeEnergyHud.gameObject.activeInHierarchy,
-                "F1/Hider switch cancelled the active reload.", SmokeFailures);
-            int hiderImpactBaseline = smokePresentation.ImpactFeedbackCount;
-            Require(!smokeWeapon.TryFireRay(new Ray(Vector3.zero, Vector3.forward), true) &&
-                    smokePresentation.ImpactFeedbackCount == hiderImpactBaseline,
-                "Non-Seeker role produced a shot/impact.", SmokeFailures);
+            Require(!smokeEnergy.TryStartReload(),
+                "Player reload API was accepted while the player owns Hider.",
+                SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI() && smokeEnergy.IsReloading,
+                "AI reload API failed in single-player Hider mode.",
+                SmokeFailures);
             smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration);
-            smokeSelector.PossessSeekerForDebug();
-            Require(smokeSelector.CurrentControlledRole == PropHuntTestRole.Seeker && smokeEnergy.CurrentCharges == 5 &&
-                    smokeEnergyHud.gameObject.activeInHierarchy,
-                "F2 did not preserve completed energy state.", SmokeFailures);
-            RequireEnergySegments(5f, "F2 restored Seeker HUD");
+            RequireEnergySegments(5f, "AI reload while player remains Hider");
 
             smokeEnergy.TryConsumeShot();
-            Require(smokeEnergy.TryStartReload(), "Could not start round-reset reload scenario.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), "Could not start round-reset reload scenario.", SmokeFailures);
             smokeEnergy.ResetForRound();
             Require(smokeEnergy.CurrentCharges == 5 && smokeEnergy.State == SeekerWeaponEnergyState.Ready && !smokeEnergy.HasActiveReload,
                 "Round reset did not cancel reload to Ready 5/5.", SmokeFailures);
 
             smokeEnergy.TryConsumeShot();
-            Require(smokeEnergy.TryStartReload(), "Could not start disable/re-enable reload scenario.", SmokeFailures);
+            Require(smokeEnergy.TryStartReloadFromAI(), "Could not start disable/re-enable reload scenario.", SmokeFailures);
             smokeEnergy.enabled = false;
             Require(smokeEnergy.State == SeekerWeaponEnergyState.Ready && !smokeEnergy.HasActiveReload,
                 "OnDisable left energy stuck in Reloading.", SmokeFailures);
             smokeEnergy.enabled = true;
-            Require(smokeEnergy.ReloadInputEnabled,
-                "Reload InputAction was not re-enabled after component recovery.", SmokeFailures);
+            smokeEnergy.TryConsumeShot();
+            Require(smokeEnergy.TryStartReloadFromAI(),
+                "AI reload did not recover after energy component re-enable.",
+                SmokeFailures);
+            smokeEnergy.AdvanceReloadForValidation(smokeEnergy.ReloadDuration);
 
             SeekerWeaponGripController grip = Object.FindObjectOfType<SeekerWeaponGripController>(true);
-            Require(grip != null && (Application.isBatchMode || grip.IkCallbackCount > 0) &&
+            RigBuilder runtimeRigBuilder = grip != null ? grip.GetComponent<RigBuilder>() : null;
+            Require(grip != null && grip.RigEvaluationCount > 0 &&
+                    runtimeRigBuilder != null && runtimeRigBuilder.graph.IsValid() &&
                     grip.WorldGunPivot != null && grip.WorldGunPivot.parent == grip.RightHand &&
-                    Vector3.Distance(grip.RightHand.position, grip.RightHandGrip.position) <= 0.01f,
-                "Runtime grip binding or LeftHand OnAnimatorIK callback was not active.", SmokeFailures);
+                    Vector3.Distance(grip.RightHand.position, grip.RightHandGrip.position) <= 0.01f &&
+                    Vector3.Distance(grip.LeftHand.position, grip.LeftHandGrip.position) <= 0.08f,
+                "Runtime Animation Rigging binding was not active.", SmokeFailures);
             impactDrainDeadline = Time.realtimeSinceStartup + 4f;
             impactManualAdvanceAt = Time.realtimeSinceStartup + 2.7f;
             impactManualAdvanceApplied = false;
@@ -712,6 +878,7 @@ public static class SeekerPresentationValidationTool
     {
         EditorApplication.update -= WaitForImpactValidation;
         EditorApplication.update -= WaitForImpactRenderProof;
+        EditorApplication.update -= WaitForRigBeforeStress;
         EditorApplication.update -= WaitForImpactPoolDrain;
         Application.logMessageReceived -= CaptureFootstepWarning;
         if (smokeBlocker != null) Object.Destroy(smokeBlocker);
@@ -763,6 +930,9 @@ public static class SeekerPresentationValidationTool
             return;
         }
 
+        // The Seeker HUD stays hidden in single-player Hider mode. Refresh its
+        // serialized segment model explicitly without activating the UI.
+        smokeEnergyHud.Refresh();
         for (int index = 0; index < smokeEnergyHud.SegmentFills.Length; index++)
         {
             float expected = Mathf.Clamp01(expectedTotal - index);
@@ -960,7 +1130,7 @@ public static class SeekerPresentationValidationTool
             $"Could not raycast the temporary {label} proof target.", SmokeFailures);
         int impactBefore = smokePresentation.ImpactFeedbackCount;
         smokeEnergy.ResetForRound();
-        Require(smokeWeapon.TryFireRay(ray, true) && smokeWeapon.LastShotResult == expectedResult,
+        Require(smokeWeapon.TryFireRayFromAI(ray, true) && smokeWeapon.LastShotResult == expectedResult,
             $"{label} proof did not resolve as {expectedResult}; result={smokeWeapon.LastShotResult}.", SmokeFailures);
         Vector3 expectedPosition = expectedHit.point + expectedHit.normal * 0.02f;
         Require(smokePresentation.ImpactFeedbackCount == impactBefore + 1 &&

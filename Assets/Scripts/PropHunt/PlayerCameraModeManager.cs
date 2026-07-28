@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using StarterAssets;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
@@ -25,10 +26,17 @@ public class PlayerCameraModeManager : MonoBehaviour
     public Camera fpsCamera;
     public Camera tpsCamera;
     public Camera spectatorCamera;
+    [SerializeField] private bool singlePlayerHiderCameraMode = true;
 
     [Header("Roots")]
     public Transform tpsCameraRoot;
     public Transform spectatorCameraRoot;
+    [SerializeField] private Transform hiderCameraTarget;
+
+    [Header("Human TPS")]
+    [SerializeField] private float humanCameraDistance = 4f;
+    [SerializeField] private float humanCameraHeight = 0.7f;
+    [SerializeField] private float humanLookTargetHeightOffset;
 
     [Header("Adaptive Prop Distance")]
     [SerializeField] private float minimumPropCameraDistance = 3.2f;
@@ -122,8 +130,20 @@ public class PlayerCameraModeManager : MonoBehaviour
     private bool _fadeUnavailableWarningLogged;
     private bool _cameraForcedOutLoggedForCurrentProp;
     private bool _cameraSystemEnabled = true;
+    private bool _cameraSafetyFailureActive;
+    private bool _applyingCameraMode;
+    private bool _hiderStateEventsSubscribed;
 
     public bool IsCameraSystemEnabled => _cameraSystemEnabled;
+    public bool SinglePlayerHiderCameraMode => singlePlayerHiderCameraMode;
+    public Camera ActiveGameplayCamera => GetCameraForMode(CurrentMode);
+    public Transform HiderCameraTarget => hiderCameraTarget;
+    public float OrbitYaw => _orbitYaw;
+    public float OrbitPitch => _orbitPitch;
+    public bool OrbitInputReady => isActiveAndEnabled &&
+                                   _input != null &&
+                                   _input.isActiveAndEnabled &&
+                                   hiderCameraTarget != null;
 
     private sealed class FadeRendererState
     {
@@ -139,11 +159,23 @@ public class PlayerCameraModeManager : MonoBehaviour
         _input = GetComponent<StarterAssetsInputs>();
         _firstPersonController = GetComponent<FirstPersonController>();
         ResolveMissingCameras();
-        SetMode(PlayerCameraMode.HumanFPS);
+        ResolveHiderCameraTarget();
+        InitializeHiderCameraTransforms();
+        CurrentMode = singlePlayerHiderCameraMode
+            ? ResolveModeFromHiderState()
+            : CurrentMode;
+        ApplyHiderCameraMode(CurrentMode, true);
+    }
+
+    private void OnEnable()
+    {
+        ResolveHiderStateSource();
+        SubscribeToHiderStateEvents();
     }
 
     private void OnDisable()
     {
+        UnsubscribeFromHiderStateEvents();
         ResetAdaptiveCamera();
         if (_firstPersonController != null)
         {
@@ -167,20 +199,222 @@ public class PlayerCameraModeManager : MonoBehaviour
         {
             fpsCamera = Camera.main;
         }
+
+        if (tpsCameraRoot == null && tpsCamera != null)
+        {
+            tpsCameraRoot = tpsCamera.transform.parent;
+        }
+    }
+
+    private void ResolveHiderCameraTarget()
+    {
+        if (hiderCameraTarget != null && hiderCameraTarget.IsChildOf(transform))
+        {
+            return;
+        }
+
+        if (_firstPersonController != null &&
+            _firstPersonController.CinemachineCameraTarget != null)
+        {
+            hiderCameraTarget =
+                _firstPersonController.CinemachineCameraTarget.transform;
+        }
+
+        if (hiderCameraTarget == null)
+        {
+            hiderCameraTarget = transform.Find("PlayerCameraRoot");
+        }
+    }
+
+    private void ResolveHiderStateSource()
+    {
+        if (_propTransformSystem == null)
+        {
+            _propTransformSystem = GetComponent<PropTransformSystem>();
+        }
+        if (_input == null)
+        {
+            _input = GetComponent<StarterAssetsInputs>();
+        }
+        if (_firstPersonController == null)
+        {
+            _firstPersonController = GetComponent<FirstPersonController>();
+        }
+    }
+
+    private void SubscribeToHiderStateEvents()
+    {
+        if (_hiderStateEventsSubscribed || _propTransformSystem == null)
+        {
+            return;
+        }
+
+        _propTransformSystem.DisguiseChanged += HandleDisguiseChanged;
+        _propTransformSystem.EliminationChanged += HandleEliminationChanged;
+        _hiderStateEventsSubscribed = true;
+    }
+
+    private void UnsubscribeFromHiderStateEvents()
+    {
+        if (!_hiderStateEventsSubscribed || _propTransformSystem == null)
+        {
+            return;
+        }
+
+        _propTransformSystem.DisguiseChanged -= HandleDisguiseChanged;
+        _propTransformSystem.EliminationChanged -= HandleEliminationChanged;
+        _hiderStateEventsSubscribed = false;
+    }
+
+    private void HandleDisguiseChanged(bool disguised)
+    {
+        if (!singlePlayerHiderCameraMode ||
+            _propTransformSystem == null ||
+            _propTransformSystem.IsEliminated ||
+            _propTransformSystem.IsGhostCameraActive)
+        {
+            return;
+        }
+
+        ApplyHiderCameraMode(
+            disguised ? PlayerCameraMode.PropTPS : PlayerCameraMode.HumanFPS,
+            true);
+    }
+
+    private void HandleEliminationChanged(bool eliminated)
+    {
+        if (singlePlayerHiderCameraMode)
+        {
+            ApplyHiderCameraMode(ResolveModeFromHiderState(), true);
+        }
+    }
+
+    private void InitializeHiderCameraTransforms()
+    {
+        if (hiderCameraTarget == null)
+        {
+            return;
+        }
+
+        hiderCameraTarget.gameObject.SetActive(true);
+        if (fpsCamera != null)
+        {
+            Transform fpsTransform = fpsCamera.transform;
+            if (fpsTransform.parent != hiderCameraTarget)
+            {
+                fpsTransform.SetParent(hiderCameraTarget, false);
+            }
+            fpsTransform.localPosition = Vector3.zero;
+            fpsTransform.localRotation = Quaternion.identity;
+            fpsTransform.localScale = Vector3.one;
+        }
+    }
+
+    public void InitializeHiderTps(Transform hiderRoot)
+    {
+        _propTransformSystem = GetComponent<PropTransformSystem>();
+        _input = GetComponent<StarterAssetsInputs>();
+        _firstPersonController = GetComponent<FirstPersonController>();
+        ResolveMissingCameras();
+        ResolveHiderCameraTarget();
+
+        if (hiderRoot == null || hiderRoot != transform)
+        {
+            throw new System.InvalidOperationException(
+                "Hider TPS must be initialized with its owning PlayerCapsule.");
+        }
+        if (fpsCamera == null || tpsCamera == null || tpsCameraRoot == null ||
+            hiderCameraTarget == null ||
+            !hiderCameraTarget.IsChildOf(hiderRoot))
+        {
+            throw new System.InvalidOperationException(
+                "Hider FPS/TPS binding is incomplete.\n" +
+                $"Owner={GetHierarchyPath(hiderRoot)}\n" +
+                $"FPSCamera={GetHierarchyPath(fpsCamera != null ? fpsCamera.transform : null)}\n" +
+                $"Camera={GetHierarchyPath(tpsCamera != null ? tpsCamera.transform : null)}\n" +
+                $"CameraRoot={GetHierarchyPath(tpsCameraRoot)}\n" +
+                $"FollowTarget={GetHierarchyPath(hiderCameraTarget)}");
+        }
+
+        InitializeHiderCameraTransforms();
+        hiderCameraTarget.gameObject.SetActive(true);
+        tpsCameraRoot.gameObject.SetActive(true);
+        if (tpsCamera.transform.parent != tpsCameraRoot)
+        {
+            tpsCamera.transform.SetParent(tpsCameraRoot, false);
+            tpsCamera.transform.localPosition = Vector3.zero;
+            tpsCamera.transform.localRotation = Quaternion.identity;
+            tpsCamera.transform.localScale = Vector3.one;
+        }
+        _orbitYaw = hiderRoot.eulerAngles.y;
+        _orbitPitch = Mathf.Clamp(10f, minimumPitch, maximumPitch);
+        _orbitInitialized = true;
+        _forceSafeNextLateUpdate = true;
     }
 
     public void SetMode(PlayerCameraMode mode)
     {
+        ApplyHiderCameraMode(NormalizeRequestedMode(mode), true);
+    }
+
+    public void ConfigureSinglePlayerHiderCamera(bool enabled)
+    {
+        singlePlayerHiderCameraMode = enabled;
+        if (!enabled)
+        {
+            return;
+        }
+
+        _cameraSystemEnabled = true;
+        ApplyHiderCameraMode(ResolveModeFromHiderState(), true);
+    }
+
+    public void ApplyResolvedHiderCameraMode()
+    {
+        ApplyHiderCameraMode(ResolveModeFromHiderState(), true);
+    }
+
+    public PlayerCameraMode ResolveModeFromHiderState()
+    {
+        ResolveHiderStateSource();
+        if (_propTransformSystem == null)
+        {
+            return PlayerCameraMode.HumanFPS;
+        }
+
+        if (_propTransformSystem.IsEliminated ||
+            _propTransformSystem.currentState == PlayerDisguiseState.Spectator)
+        {
+            return PlayerCameraMode.Spectator;
+        }
+
+        if (_propTransformSystem.IsGhostCameraActive)
+        {
+            return PlayerCameraMode.GhostCamera;
+        }
+
+        return _propTransformSystem.IsDisguised
+            ? PlayerCameraMode.PropTPS
+            : PlayerCameraMode.HumanFPS;
+    }
+
+    private void ApplyHiderCameraMode(PlayerCameraMode mode, bool validate)
+    {
+        if (_applyingCameraMode)
+        {
+            return;
+        }
+
+        _applyingCameraMode = true;
         PlayerCameraMode previousMode = CurrentMode;
         CurrentMode = mode;
 
-        SetCameraActive(fpsCamera, _cameraSystemEnabled && mode == PlayerCameraMode.HumanFPS);
-        SetCameraActive(
-            tpsCamera,
-            _cameraSystemEnabled &&
-            (mode == PlayerCameraMode.PropTPS || mode == PlayerCameraMode.GhostCamera)
-        );
-        SetCameraActive(spectatorCamera, _cameraSystemEnabled && mode == PlayerCameraMode.Spectator);
+        Camera target = _cameraSystemEnabled ? GetCameraForMode(mode) : null;
+        // Bring the destination fully online before retiring the previous camera.
+        SetCameraActive(target, true);
+        if (fpsCamera != target) SetCameraActive(fpsCamera, false);
+        if (tpsCamera != target) SetCameraActive(tpsCamera, false);
+        if (spectatorCamera != target) SetCameraActive(spectatorCamera, false);
 
         if (_firstPersonController != null)
         {
@@ -221,10 +455,23 @@ public class PlayerCameraModeManager : MonoBehaviour
         {
             Debug.Log($"PlayerCameraModeManager: switched camera to {mode}.");
         }
+        _applyingCameraMode = false;
+
+        if (validate && _cameraSystemEnabled)
+        {
+            EnsureGameplayCameraRendering($"ApplyHiderCameraMode({mode})");
+        }
     }
 
     public void SetCameraSystemEnabled(bool enabled)
     {
+        if (!enabled && singlePlayerHiderCameraMode)
+        {
+            Debug.LogWarning(
+                "[CameraSafety] Ignored request to disable all Hider cameras in single-player mode.");
+            enabled = true;
+        }
+
         _cameraSystemEnabled = enabled;
         if (!enabled)
         {
@@ -238,7 +485,105 @@ public class PlayerCameraModeManager : MonoBehaviour
             return;
         }
 
-        SetMode(CurrentMode);
+        ApplyHiderCameraMode(NormalizeRequestedMode(CurrentMode), true);
+    }
+
+    public bool EnsureGameplayCameraRendering(string context)
+    {
+        // Scene teardown deactivates the player hierarchy before every component has
+        // received OnDisable. Do not treat that transient shutdown state as a camera
+        // outage or attempt to recover cameras on an object Unity is unloading.
+        if (Application.isPlaying &&
+            (!isActiveAndEnabled || !gameObject.activeInHierarchy || !gameObject.scene.isLoaded))
+        {
+            return true;
+        }
+
+        if (!_cameraSystemEnabled && !singlePlayerHiderCameraMode)
+        {
+            return false;
+        }
+
+        int renderingCount = CountRenderingGameplayCameras();
+        int listenerCount = CountEnabledGameplayListeners();
+        if (renderingCount == 1 && listenerCount == 1)
+        {
+            _cameraSafetyFailureActive = false;
+            return true;
+        }
+
+        bool hiderAlive = _propTransformSystem == null || !_propTransformSystem.IsEliminated;
+        PlayerCameraMode recoveryMode = singlePlayerHiderCameraMode
+            ? ResolveModeFromHiderState()
+            : NormalizeRequestedMode(CurrentMode);
+        if (!_cameraSafetyFailureActive)
+        {
+            PropHuntRoundManager round = FindObjectOfType<PropHuntRoundManager>();
+            Debug.LogError(
+                "[CameraSafety] No valid single gameplay camera rendering Display 1.\n" +
+                $"Context: {context}\n" +
+                $"Current mode: {CurrentMode}\n" +
+                $"Controlled state: {(singlePlayerHiderCameraMode ? "Hider" : "Legacy")}\n" +
+                $"Hider alive: {hiderAlive}\n" +
+                $"Ghost active: {_propTransformSystem != null && _propTransformSystem.IsGhostCameraActive}\n" +
+                $"Spectator active: {CurrentMode == PlayerCameraMode.Spectator}\n" +
+                $"Round state: {(round != null ? round.CurrentState.ToString() : "<missing>")}\n" +
+                $"Rendering cameras: {renderingCount}; enabled listeners: {listenerCount}\n" +
+                $"Recovering to {recoveryMode}.\n" +
+                BuildCameraDiagnostic());
+        }
+        _cameraSafetyFailureActive = true;
+        _cameraSystemEnabled = true;
+        ApplyHiderCameraMode(recoveryMode, false);
+
+        bool recovered = CountRenderingGameplayCameras() == 1 &&
+                         CountEnabledGameplayListeners() == 1;
+        if (recovered)
+        {
+            _cameraSafetyFailureActive = false;
+        }
+        return recovered;
+    }
+
+    public string BuildCameraDiagnostic()
+    {
+        StringBuilder result = new StringBuilder();
+        foreach (Camera camera in Resources.FindObjectsOfTypeAll<Camera>())
+        {
+            if (camera == null || !camera.gameObject.scene.IsValid())
+            {
+                continue;
+            }
+
+            AudioListener listener = camera.GetComponent<AudioListener>();
+            string controller = camera == tpsCamera
+                ? $"{nameof(PlayerCameraModeManager)}(enabled={isActiveAndEnabled})"
+                : camera == spectatorCamera
+                    ? "HiderSpectatorController"
+                    : camera == fpsCamera
+                        ? nameof(FirstPersonController)
+                        : "<none>";
+            result.AppendLine(
+                $"Camera path={GetHierarchyPath(camera.transform)}, " +
+                $"activeSelf={camera.gameObject.activeSelf}, " +
+                $"activeInHierarchy={camera.gameObject.activeInHierarchy}, " +
+                $"enabled={camera.enabled}, tag={camera.tag}, " +
+                $"targetDisplay={camera.targetDisplay}, " +
+                $"cameraType={camera.cameraType}, depth={camera.depth:F2}, " +
+                $"cullingMask={camera.cullingMask}, " +
+                $"targetTexture={(camera.targetTexture != null ? camera.targetTexture.name : "<null>")}, " +
+                $"parent={GetHierarchyPath(camera.transform.parent)}, " +
+                $"parentActive={(camera.transform.parent == null || camera.transform.parent.gameObject.activeInHierarchy)}, " +
+                $"position={camera.transform.position}, rotation={camera.transform.eulerAngles}, " +
+                $"controller={controller}, " +
+                $"followTarget={(camera == tpsCamera ? GetHierarchyPath(hiderCameraTarget) : "<n/a>")}, " +
+                $"lookTarget={(camera == tpsCamera ? GetHierarchyPath(hiderCameraTarget) : "<n/a>")}, " +
+                $"listener={(listener != null)}, listenerEnabled={(listener != null && listener.enabled)}");
+        }
+        result.AppendLine(
+            $"TPS manager enabled={isActiveAndEnabled}, LateUpdateMode={CurrentMode}, " +
+            $"orbitInputReady={OrbitInputReady}, yaw={_orbitYaw:F2}, pitch={_orbitPitch:F2}");
+        return result.ToString();
     }
 
     public bool BeginGhostCamera(Vector3 anchorPosition, Transform playerRoot)
@@ -430,6 +775,8 @@ public class PlayerCameraModeManager : MonoBehaviour
             return;
         }
 
+        EnsureGameplayCameraRendering("LateUpdate");
+
         if (CurrentMode == PlayerCameraMode.GhostCamera)
         {
             UpdateGhostCamera();
@@ -437,10 +784,8 @@ public class PlayerCameraModeManager : MonoBehaviour
         }
 
         if (CurrentMode != PlayerCameraMode.PropTPS ||
-            _propTarget == null ||
             tpsCamera == null ||
             _propTransformSystem == null ||
-            !_propTransformSystem.IsDisguised ||
             _propTransformSystem.IsGhostCameraActive ||
             _propTransformSystem.IsEliminated)
         {
@@ -448,12 +793,22 @@ public class PlayerCameraModeManager : MonoBehaviour
             return;
         }
 
-        if (!TryGetCurrentPropWorldBounds(out Bounds bounds))
+        ResolveHiderCameraTarget();
+        if (hiderCameraTarget == null)
         {
             return;
         }
 
         UpdateOrbitInput();
+        if (!_propTransformSystem.IsDisguised ||
+            _propTarget == null ||
+            !TryGetCurrentPropWorldBounds(out Bounds bounds))
+        {
+            RestorePropAlpha();
+            UpdateHumanTpsCamera();
+            return;
+        }
+
         UpdateAdaptiveMode(true);
         CalculateDesiredDistanceAndHeight(
             bounds,
@@ -524,6 +879,60 @@ public class PlayerCameraModeManager : MonoBehaviour
         }
 
         UpdatePropFade(bounds, nextPosition);
+    }
+
+    private void UpdateHumanTpsCamera()
+    {
+        Vector3 lookTarget =
+            hiderCameraTarget.position + Vector3.up * humanLookTargetHeightOffset;
+        float distance = Mathf.Clamp(
+            humanCameraDistance + _userZoomOffset,
+            minimumPropCameraDistance,
+            maximumPropCameraDistance);
+        Quaternion orbitRotation = Quaternion.Euler(_orbitPitch, _orbitYaw, 0f);
+        Vector3 desiredPosition =
+            lookTarget +
+            orbitRotation * Vector3.back * distance +
+            Vector3.up * humanCameraHeight;
+        Vector3 safePosition = ResolveCameraCollision(lookTarget, desiredPosition);
+
+        Transform cameraTransform = tpsCamera.transform;
+        bool snap = _forceSafeNextLateUpdate ||
+                    !IsFinite(cameraTransform.position) ||
+                    Vector3.Distance(cameraTransform.position, lookTarget) >
+                    maximumPropCameraDistance * 3f;
+        Vector3 nextPosition = snap
+            ? safePosition
+            : Vector3.SmoothDamp(
+                cameraTransform.position,
+                safePosition,
+                ref _positionVelocity,
+                positionSmoothTime);
+        cameraTransform.position = nextPosition;
+
+        Vector3 lookDirection = lookTarget - nextPosition;
+        if (lookDirection.sqrMagnitude > 0.0001f)
+        {
+            Quaternion desiredRotation =
+                Quaternion.LookRotation(lookDirection, Vector3.up);
+            cameraTransform.rotation = snap
+                ? desiredRotation
+                : Quaternion.Slerp(
+                    cameraTransform.rotation,
+                    desiredRotation,
+                    Mathf.Clamp01(rotationSmoothSpeed * Time.deltaTime));
+        }
+
+        cameraDistance = distance;
+        cameraHeight = humanCameraHeight;
+        _forceSafeNextLateUpdate = false;
+    }
+
+    private static bool IsFinite(Vector3 value)
+    {
+        return float.IsFinite(value.x) &&
+               float.IsFinite(value.y) &&
+               float.IsFinite(value.z);
     }
 
     private void UpdateAdaptiveMode(bool logChange)
@@ -1109,6 +1518,95 @@ public class PlayerCameraModeManager : MonoBehaviour
 #endif
     }
 
+    private PlayerCameraMode NormalizeRequestedMode(PlayerCameraMode mode)
+    {
+        if (!singlePlayerHiderCameraMode)
+        {
+            return mode;
+        }
+
+        ResolveHiderStateSource();
+        if (_propTransformSystem == null)
+        {
+            return mode;
+        }
+
+        if (_propTransformSystem.IsEliminated)
+        {
+            return PlayerCameraMode.Spectator;
+        }
+
+        // Ghost is entered explicitly before PropTransformSystem flips its active flag.
+        if (mode == PlayerCameraMode.GhostCamera)
+        {
+            return mode;
+        }
+
+        if (_propTransformSystem.IsGhostCameraActive)
+        {
+            return PlayerCameraMode.GhostCamera;
+        }
+
+        return _propTransformSystem.IsDisguised
+            ? PlayerCameraMode.PropTPS
+            : PlayerCameraMode.HumanFPS;
+    }
+
+    private Camera GetCameraForMode(PlayerCameraMode mode)
+    {
+        switch (mode)
+        {
+            case PlayerCameraMode.HumanFPS:
+                return fpsCamera;
+            case PlayerCameraMode.PropTPS:
+            case PlayerCameraMode.GhostCamera:
+                return tpsCamera;
+            case PlayerCameraMode.Spectator:
+                return spectatorCamera;
+            default:
+                return null;
+        }
+    }
+
+    private int CountRenderingGameplayCameras()
+    {
+        int count = 0;
+        if (IsRenderingDisplayOne(fpsCamera)) count++;
+        if (tpsCamera != fpsCamera && IsRenderingDisplayOne(tpsCamera)) count++;
+        if (spectatorCamera != fpsCamera && spectatorCamera != tpsCamera &&
+            IsRenderingDisplayOne(spectatorCamera)) count++;
+        return count;
+    }
+
+    private int CountEnabledGameplayListeners()
+    {
+        int count = 0;
+        count += IsEnabledListener(fpsCamera) ? 1 : 0;
+        if (tpsCamera != fpsCamera) count += IsEnabledListener(tpsCamera) ? 1 : 0;
+        if (spectatorCamera != fpsCamera && spectatorCamera != tpsCamera)
+            count += IsEnabledListener(spectatorCamera) ? 1 : 0;
+        return count;
+    }
+
+    private static bool IsRenderingDisplayOne(Camera camera)
+    {
+        return camera != null &&
+               camera.enabled &&
+               camera.gameObject.activeInHierarchy &&
+               camera.targetDisplay == 0 &&
+               camera.targetTexture == null;
+    }
+
+    private static bool IsEnabledListener(Camera camera)
+    {
+        if (camera == null || !camera.gameObject.activeInHierarchy)
+        {
+            return false;
+        }
+        AudioListener listener = camera.GetComponent<AudioListener>();
+        return listener != null && listener.enabled;
+    }
+
     private static void SetCameraActive(Camera targetCamera, bool active)
     {
         if (targetCamera == null)
@@ -1116,14 +1614,35 @@ public class PlayerCameraModeManager : MonoBehaviour
             return;
         }
 
-        targetCamera.gameObject.tag = active ? "MainCamera" : "Untagged";
-        targetCamera.gameObject.SetActive(active);
-
         AudioListener listener = targetCamera.GetComponent<AudioListener>();
-        if (listener != null)
+        if (active)
         {
-            listener.enabled = active;
+            targetCamera.targetDisplay = 0;
+            targetCamera.targetTexture = null;
+            targetCamera.gameObject.SetActive(true);
+            targetCamera.enabled = true;
+            targetCamera.gameObject.tag = "MainCamera";
+            if (listener != null) listener.enabled = true;
         }
+        else
+        {
+            if (listener != null) listener.enabled = false;
+            targetCamera.enabled = false;
+            targetCamera.gameObject.tag = "Untagged";
+            targetCamera.gameObject.SetActive(false);
+        }
+    }
+
+    private static string GetHierarchyPath(Transform item)
+    {
+        if (item == null) return "<null>";
+        string path = item.name;
+        while (item.parent != null)
+        {
+            item = item.parent;
+            path = item.name + "/" + path;
+        }
+        return path;
     }
 
     private Camera FindNamedCameraInChildren(string cameraName)

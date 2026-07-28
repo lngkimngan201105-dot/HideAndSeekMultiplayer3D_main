@@ -793,8 +793,10 @@ public static class HiderCompleteHUDSetupTool
 
         if (hider.cameraModeManager != null)
         {
+            hider.cameraModeManager.InitializeHiderTps(hider.transform);
+            hider.cameraModeManager.ConfigureSinglePlayerHiderCamera(true);
             hider.cameraModeManager.SetCameraSystemEnabled(true);
-            hider.cameraModeManager.SetMode(PlayerCameraMode.HumanFPS);
+            hider.cameraModeManager.ApplyResolvedHiderCameraMode();
             EditorUtility.SetDirty(hider.cameraModeManager);
         }
 
@@ -933,7 +935,10 @@ public static class HiderCompleteHUDSetupTool
         visualRoot.transform.localPosition = Vector3.zero;
         visualRoot.transform.localRotation = Quaternion.identity;
         visualRoot.transform.localScale = Vector3.one;
-        StripNonTransformComponents(visualRoot, false);
+        // This wrapper is shared with the integrated Cyber Soldier/world-gun
+        // presentation. Cleaning it recursively used to strip MeshFilter,
+        // MeshRenderer, muzzle VFX and lights from otherwise valid children.
+        StripNonTransformComponentsOnObject(visualRoot);
 
         Transform existingModel = visualRoot.transform.Find("IndustrialSeekerModel");
         if (existingModel != null &&
@@ -1080,6 +1085,15 @@ public static class HiderCompleteHUDSetupTool
                     continue;
                 Undo.DestroyObjectImmediate(component);
             }
+        }
+    }
+
+    private static void StripNonTransformComponentsOnObject(GameObject root)
+    {
+        foreach (Component component in root.GetComponents<Component>())
+        {
+            if (component == null || component is Transform) continue;
+            Undo.DestroyObjectImmediate(component);
         }
     }
 

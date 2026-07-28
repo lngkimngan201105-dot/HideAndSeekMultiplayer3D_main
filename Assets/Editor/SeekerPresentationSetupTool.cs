@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using TMPro;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Animations.Rigging;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using Object = UnityEngine.Object;
@@ -21,6 +23,55 @@ public static class SeekerPresentationSetupTool
     public const string SeekerHoldControllerPath = "Assets/Animations/PropHunt/SeekerWeaponHold.controller";
     public const string ImpactPackageRoot = "Assets/Inguz Media Studio/Free 2D Impact FX";
     public const string ImpactPrefabPath = ImpactPackageRoot + "/Prefabs/Impact02.prefab";
+    public const string SourceGunAssetPath =
+        "Assets/Sci Fi Gun Light/Prefabs/SciFiGunLight/SciFiGunLight_Blue.prefab";
+    private const float VisualBoundsEpsilon = 0.0001f;
+    private const int ManualGunAlignmentVersion = 1;
+
+    public static void EnsurePresentationConfigured()
+    {
+        Scene scene = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+        GameObject seeker = FindSceneObject(scene, "SeekerPlayer");
+        Transform worldGun = FindDirectOrDescendant(seeker.transform, "SciFiGunLight_World");
+        Transform fpsGun = FindDirectOrDescendant(seeker.transform, "SciFiGunLight_FPS");
+        Transform worldMuzzle = FindDirectOrDescendant(seeker.transform, "MuzzlePoint_World");
+        Transform cyberVisual = FindDirectOrDescendant(seeker.transform, "CyberSoldierVisual");
+        SeekerWeaponPresentation presentation = seeker.GetComponent<SeekerWeaponPresentation>();
+        SeekerWeaponEnergy energy = seeker.GetComponent<SeekerWeaponEnergy>();
+        SeekerRaycastWeapon weapon = seeker.GetComponentInChildren<SeekerRaycastWeapon>(true);
+        SeekerWeaponGripController grip =
+            cyberVisual != null ? cyberVisual.GetComponent<SeekerWeaponGripController>() : null;
+        bool cyberValid = cyberVisual != null &&
+                          cyberVisual.GetComponentInChildren<Animator>(true) != null &&
+                          HasRealVisualMesh(cyberVisual.gameObject);
+        bool worldValid = worldGun != null &&
+                          TryCalculateVisualBounds(worldGun.gameObject, out _, out _);
+        bool fpsValid = fpsGun != null &&
+                        TryCalculateVisualBounds(fpsGun.gameObject, out _, out _);
+        bool referencesValid = presentation != null && energy != null && weapon != null &&
+                               presentation.AudioSource != null &&
+                               presentation.ShotAudioClip != null &&
+                               presentation.ReloadAudioClip != null &&
+                               presentation.ImpactPrefab != null &&
+                               presentation.MuzzleFlash != null &&
+                               worldMuzzle != null &&
+                               presentation.MuzzleFlash.transform.IsChildOf(worldMuzzle);
+        bool rigValid = grip != null &&
+                        grip.ManualAlignmentVersion == ManualGunAlignmentVersion &&
+                        grip.WeaponRig != null &&
+                        grip.RightArmIk != null &&
+                        grip.LeftArmIk != null &&
+                        grip.UpperBodyAim != null &&
+                        grip.AIAimTarget != null &&
+                        cyberVisual.GetComponent<RigBuilder>() != null;
+        if (cyberValid && worldValid && fpsValid && referencesValid && rigValid)
+        {
+            Debug.Log("[SeekerPresentationSetup] Existing presentation is valid; references retained without rebuilding user-adjusted pivots.");
+            return;
+        }
+
+        Setup();
+    }
 
     [MenuItem("Tools/Prop Hunt/Setup Seeker Presentation + Energy")]
     public static void Setup()
@@ -28,9 +79,10 @@ public static class SeekerPresentationSetupTool
         GameObject cyberSource = FindAsset<GameObject>(
             path => path.EndsWith("CyberSoldier.fbx", StringComparison.OrdinalIgnoreCase),
             "Cyber Soldier model");
-        GameObject gunSource = FindAsset<GameObject>(
-            path => path.EndsWith("SciFiGunLight_Blue.prefab", StringComparison.OrdinalIgnoreCase),
-            "Sci-Fi Gun Light Blue prefab");
+        GameObject gunSource = AssetDatabase.LoadAssetAtPath<GameObject>(SourceGunAssetPath);
+        if (gunSource == null)
+            throw new InvalidOperationException(
+                $"Sci-Fi Gun Light Blue prefab is missing at exact path: {SourceGunAssetPath}");
         AudioClip shotClip = FindAsset<AudioClip>(
             path => Path.GetFileNameWithoutExtension(path).Equals("light_blast_3", StringComparison.OrdinalIgnoreCase),
             "laser shot audio");
@@ -59,14 +111,46 @@ public static class SeekerPresentationSetupTool
         GameObject seekerHudRoot = FindSceneObject(scene, "SeekerHUDRoot");
         GameObject seekerHealthBar = FindDirectOrDescendant(seekerHudRoot.transform, "SeekerHealthBar")?.gameObject;
 
+        Transform priorWorldPivot = FindDirectOrDescendant(worldRoot.transform, "SeekerWorldGunPivot");
+        Transform priorWorldGun = priorWorldPivot != null
+            ? FindDirectChild(priorWorldPivot, "SciFiGunLight_World")
+            : null;
+        bool priorWorldGunValid = priorWorldGun != null &&
+                                  TryCalculateVisualBounds(
+                                      priorWorldGun.gameObject, out _, out _);
+        Vector3 priorPivotPosition = priorWorldGunValid
+            ? priorWorldPivot.localPosition
+            : Vector3.zero;
+        Quaternion priorPivotRotation = priorWorldGunValid
+            ? priorWorldPivot.localRotation
+            : Quaternion.identity;
+        Vector3 priorPivotScale = priorWorldGunValid
+            ? priorWorldPivot.localScale
+            : Vector3.one;
+
         GameObject cyberModel = RebuildCyberSoldier(seeker, worldRoot, cyberSource, worldLayer);
         Animator cyberAnimator = cyberModel.GetComponentInChildren<Animator>(true);
         GameObject cyberVisual = FindDirectOrDescendant(cyberModel.transform, "CyberSoldierVisual").gameObject;
         CyberSoldierAnimationEventReceiver animationEventReceiver =
             GetOrAddUniqueComponent<CyberSoldierAnimationEventReceiver>(cyberVisual);
         animationEventReceiver.ConfigureInactive();
-        Transform rightHand = FindRightHand(cyberAnimator, cyberModel.transform);
-        Transform leftHand = FindLeftHand(cyberAnimator, cyberModel.transform);
+        Dictionary<HumanBodyBones, Transform> bones = AuditHumanoidBones(cyberAnimator);
+        Transform hips = bones[HumanBodyBones.Hips];
+        Transform spine = bones[HumanBodyBones.Spine];
+        Transform chest = bones[HumanBodyBones.Chest];
+        Transform leftShoulder = bones[HumanBodyBones.LeftShoulder];
+        Transform leftUpperArm = bones[HumanBodyBones.LeftUpperArm];
+        Transform leftLowerArm = bones[HumanBodyBones.LeftLowerArm];
+        Transform leftHand = bones[HumanBodyBones.LeftHand];
+        Transform rightShoulder = bones[HumanBodyBones.RightShoulder];
+        Transform rightUpperArm = bones[HumanBodyBones.RightUpperArm];
+        Transform rightLowerArm = bones[HumanBodyBones.RightLowerArm];
+        Transform rightHand = bones[HumanBodyBones.RightHand];
+        SeekerWeaponGripController existingGripController =
+            cyberAnimator.GetComponent<SeekerWeaponGripController>();
+        bool approvedManualAlignment = existingGripController != null &&
+                                       existingGripController.ManualAlignmentVersion >=
+                                       ManualGunAlignmentVersion;
         GameObject fpsGun = RebuildGun(
             weaponHolder.transform,
             "SeekerFPSGunPivot",
@@ -77,6 +161,25 @@ public static class SeekerPresentationSetupTool
             Vector3.zero,
             Quaternion.identity,
             "MuzzlePoint");
+        Transform existingWorldPivot = FindDirectChild(rightHand, "SeekerWorldGunPivot");
+        Transform existingWorldGun = existingWorldPivot != null
+            ? FindDirectChild(existingWorldPivot, "SciFiGunLight_World")
+            : null;
+        bool currentWorldGunValid = existingWorldGun != null &&
+                                    TryCalculateVisualBounds(
+                                        existingWorldGun.gameObject, out _, out _);
+        bool preserveWorldPivot = approvedManualAlignment &&
+                                  (currentWorldGunValid || priorWorldGunValid);
+        Vector3 preservedPivotPosition = preserveWorldPivot
+            ? (currentWorldGunValid ? existingWorldPivot.localPosition : priorPivotPosition)
+            : Vector3.zero;
+        Quaternion preservedPivotRotation = preserveWorldPivot
+            ? (currentWorldGunValid ? existingWorldPivot.localRotation : priorPivotRotation)
+            : Quaternion.identity;
+        Vector3 preservedPivotScale = preserveWorldPivot
+            ? (currentWorldGunValid ? existingWorldPivot.localScale : priorPivotScale)
+            : Vector3.one;
+
         GameObject worldGun = RebuildGun(
             rightHand,
             "SeekerWorldGunPivot",
@@ -88,25 +191,83 @@ public static class SeekerPresentationSetupTool
             Quaternion.identity,
             "MuzzlePoint_World");
         Transform worldPivot = worldGun.transform.parent;
-        worldPivot.rotation = Quaternion.LookRotation(seeker.transform.forward, Vector3.up);
         FitGunToWorldDimension(worldGun, 0.90f, "MuzzlePoint_World");
         ConfigureWorldGripPoints(worldGun, out Transform rightHandGrip, out Transform leftHandGrip);
-        worldPivot.position += rightHand.position - rightHandGrip.position;
+        if (preserveWorldPivot)
+        {
+            worldPivot.localPosition = preservedPivotPosition;
+            worldPivot.localRotation = preservedPivotRotation;
+            worldPivot.localScale = preservedPivotScale;
+        }
+        else
+        {
+            worldPivot.SetParent(rightHand, false);
+            worldPivot.localScale = Vector3.one;
+            worldPivot.SetPositionAndRotation(
+                rightHand.position,
+                Quaternion.LookRotation(seeker.transform.forward, Vector3.up));
+            Vector3 gripOffsetFromPivot = rightHandGrip.position - worldPivot.position;
+            worldPivot.position = rightHand.position - gripOffsetFromPivot;
+        }
         rightHandGrip.rotation = rightHand.rotation;
         leftHandGrip.rotation = leftHand.rotation;
         AnimatorController holdController = EnsureSeekerHoldController();
         cyberAnimator.runtimeAnimatorController = holdController;
         cyberAnimator.applyRootMotion = false;
+        cyberAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+        EditorUtility.SetDirty(cyberAnimator);
+        PrefabUtility.RecordPrefabInstancePropertyModifications(cyberAnimator);
+        ConfigureWeaponRig(
+            seeker.transform,
+            cyberAnimator,
+            chest,
+            leftUpperArm,
+            leftLowerArm,
+            leftHand,
+            rightUpperArm,
+            rightLowerArm,
+            rightHand,
+            rightHandGrip,
+            leftHandGrip,
+            out Rig weaponRig,
+            out TwoBoneIKConstraint rightArmIk,
+            out TwoBoneIKConstraint leftArmIk,
+            out MultiAimConstraint upperBodyAim,
+            out Transform aiAimTarget,
+            out Transform rightHandIkTarget);
         SeekerWeaponGripController gripController = GetOrAddUniqueComponent<SeekerWeaponGripController>(cyberAnimator.gameObject);
-        gripController.Configure(cyberAnimator, rightHand, leftHand, worldPivot, rightHandGrip, leftHandGrip);
+        gripController.Configure(
+            cyberAnimator,
+            rightHand,
+            leftHand,
+            chest,
+            worldPivot,
+            rightHandGrip,
+            leftHandGrip,
+            rightHandIkTarget,
+            weaponRig,
+            rightArmIk,
+            leftArmIk,
+            upperBodyAim,
+            aiAimTarget,
+            ManualGunAlignmentVersion);
 
         if (industrialFallback != null) industrialFallback.SetActive(false);
         if (pulseFallback != null) pulseFallback.SetActive(false);
 
-        Transform muzzlePoint = FindDirectOrDescendant(fpsGun.transform, "MuzzlePoint");
+        Transform fpsMuzzlePoint =
+            FindDirectOrDescendant(fpsGun.transform, "MuzzlePoint");
+        Transform worldMuzzlePoint =
+            FindDirectOrDescendant(worldGun.transform, "MuzzlePoint_World");
+        if (fpsMuzzlePoint == null || worldMuzzlePoint == null)
+            throw new InvalidOperationException(
+                "FPS or world muzzle point is missing after gun setup.");
         Material muzzleMaterial = EnsureMuzzleMaterial();
-        ParticleSystem muzzleFlash = ConfigureMuzzleFlash(muzzlePoint, muzzleMaterial);
-        Light muzzleLight = ConfigureMuzzleLight(muzzlePoint);
+        ConfigureMuzzleFlash(fpsMuzzlePoint, muzzleMaterial);
+        ConfigureMuzzleLight(fpsMuzzlePoint);
+        ParticleSystem muzzleFlash =
+            ConfigureMuzzleFlash(worldMuzzlePoint, muzzleMaterial);
+        Light muzzleLight = ConfigureMuzzleLight(worldMuzzlePoint);
 
         GameObject impactPoolObject = EnsureChild(seeker.transform, "SeekerImpactPool");
         impactPoolObject.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
@@ -162,15 +323,21 @@ public static class SeekerPresentationSetupTool
             $"Impact={AssetDatabase.GetAssetPath(impactPrefab)}\n" +
             $"Impact prefab inventory=[{impactInventory}]\n" +
             $"AnimationEventReceiver={GetHierarchyPath(animationEventReceiver.transform)}\n" +
+            $"HumanoidAudit Hips={GetHierarchyPath(hips)}, Spine={GetHierarchyPath(spine)}, Chest={GetHierarchyPath(chest)}\n" +
+            $"HumanoidAudit LeftShoulder={GetHierarchyPath(leftShoulder)}, LeftUpperArm={GetHierarchyPath(leftUpperArm)}, LeftLowerArm={GetHierarchyPath(leftLowerArm)}\n" +
+            $"HumanoidAudit RightShoulder={GetHierarchyPath(rightShoulder)}, RightUpperArm={GetHierarchyPath(rightUpperArm)}, RightLowerArm={GetHierarchyPath(rightLowerArm)}\n" +
             $"RightHand={GetHierarchyPath(rightHand)}\n" +
             $"LeftHand={GetHierarchyPath(leftHand)}\n" +
             $"HoldController={AssetDatabase.GetAssetPath(holdController)} (IK Pass={holdController.layers[0].iKPass})\n" +
+            $"Rig={GetHierarchyPath(weaponRig.transform)}, RightArmIK={GetHierarchyPath(rightArmIk.transform)}, LeftArmIK={GetHierarchyPath(leftArmIk.transform)}, UpperBodyAim={GetHierarchyPath(upperBodyAim.transform)}\n" +
+            $"AIAimTarget={GetHierarchyPath(aiAimTarget)}\n" +
             $"Layers: World={worldLayer}, FPS={fpsLayer}\n" +
             $"Cyber local={FormatTransform(cyberModel.transform)}\n" +
             $"WeaponHolder local={FormatTransform(weaponHolder.transform)}\n" +
             $"FPS pivot local={FormatTransform(fpsGun.transform.parent)}\n" +
             $"FPS gun local={FormatTransform(fpsGun.transform)}\n" +
-            $"Muzzle local={FormatTransform(muzzlePoint)}\n" +
+            $"FPS muzzle local={FormatTransform(fpsMuzzlePoint)}\n" +
+            $"World muzzle local={FormatTransform(worldMuzzlePoint)}\n" +
             $"World pivot local={FormatTransform(worldPivot)}\n" +
             $"World gun local={FormatTransform(worldGun.transform)}\n" +
             $"RightHandGrip={GetHierarchyPath(rightHandGrip)}, distance={Vector3.Distance(rightHand.position, rightHandGrip.position):F6}m\n" +
@@ -181,7 +348,48 @@ public static class SeekerPresentationSetupTool
     public static void SetupTwiceAndValidate()
     {
         Setup();
+        Scene firstScene = SceneManager.GetActiveScene();
+        GameObject firstWorldGun = FindSceneObject(firstScene, "SciFiGunLight_World");
+        Transform firstMesh = FindDirectChild(firstWorldGun.transform, "GunMesh");
+        Transform firstPivot = firstWorldGun.transform.parent;
+        Vector3 firstScale = firstMesh != null ? firstMesh.localScale : Vector3.zero;
+        Vector3 firstPivotPosition = firstPivot.localPosition;
+        Quaternion firstPivotRotation = firstPivot.localRotation;
+        Vector3 firstPivotScale = firstPivot.localScale;
+        int firstRigBuilders = Object.FindObjectsOfType<RigBuilder>(true).Length;
+        int firstRigs = Object.FindObjectsOfType<Rig>(true).Length;
+        int firstTwoBoneIks = Object.FindObjectsOfType<TwoBoneIKConstraint>(true).Length;
+        int firstMultiAims = Object.FindObjectsOfType<MultiAimConstraint>(true).Length;
+        Debug.Log($"[SeekerPresentationSetup] SETUP PASS 1 scale={firstScale:F6}.");
+
         Setup();
+        Scene secondScene = SceneManager.GetActiveScene();
+        GameObject secondWorldGun = FindSceneObject(secondScene, "SciFiGunLight_World");
+        Transform secondMesh = FindDirectChild(secondWorldGun.transform, "GunMesh");
+        Transform secondPivot = secondWorldGun.transform.parent;
+        Vector3 secondScale = secondMesh != null ? secondMesh.localScale : Vector3.zero;
+        if (Vector3.Distance(firstScale, secondScale) > 0.0001f)
+            throw new InvalidOperationException(
+                $"World gun scale is not idempotent: pass1={firstScale:F6}, pass2={secondScale:F6}.");
+        if (Vector3.Distance(firstPivotPosition, secondPivot.localPosition) > 0.0001f ||
+            Quaternion.Angle(firstPivotRotation, secondPivot.localRotation) > 0.01f ||
+            Vector3.Distance(firstPivotScale, secondPivot.localScale) > 0.0001f)
+            throw new InvalidOperationException(
+                "Valid user-adjusted SeekerWorldGunPivot changed during the second setup pass.");
+        int secondRigBuilders = Object.FindObjectsOfType<RigBuilder>(true).Length;
+        int secondRigs = Object.FindObjectsOfType<Rig>(true).Length;
+        int secondTwoBoneIks = Object.FindObjectsOfType<TwoBoneIKConstraint>(true).Length;
+        int secondMultiAims = Object.FindObjectsOfType<MultiAimConstraint>(true).Length;
+        if (firstRigBuilders != secondRigBuilders ||
+            firstRigs != secondRigs ||
+            firstTwoBoneIks != secondTwoBoneIks ||
+            firstMultiAims != secondMultiAims)
+            throw new InvalidOperationException(
+                "Animation Rigging component counts changed during the second setup pass.");
+        Debug.Log(
+            $"[SeekerPresentationSetup] SETUP PASS 2 scale={secondScale:F6}; pivot retained; " +
+            $"RigBuilder={secondRigBuilders}, Rig={secondRigs}, " +
+            $"TwoBoneIK={secondTwoBoneIks}, MultiAim={secondMultiAims}.");
         SeekerPresentationValidationTool.ValidateStatic();
     }
 
@@ -195,6 +403,19 @@ public static class SeekerPresentationSetupTool
         wrapper.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
         wrapper.transform.localScale = Vector3.one;
         Transform existingVisual = FindDirectChild(wrapper.transform, "CyberSoldierVisual");
+        if (existingVisual != null &&
+            (existingVisual.GetComponentInChildren<Animator>(true) == null ||
+             !HasRealVisualMesh(existingVisual.gameObject)))
+        {
+            Debug.LogWarning(
+                "[SeekerPresentationSetup] Repairing invalid CyberSoldierVisual " +
+                $"at {GetHierarchyPath(existingVisual)}: " +
+                $"Animator={existingVisual.GetComponentInChildren<Animator>(true) != null}, " +
+                $"SkinnedMeshRenderers={existingVisual.GetComponentsInChildren<SkinnedMeshRenderer>(true).Length}, " +
+                $"MeshFilters={existingVisual.GetComponentsInChildren<MeshFilter>(true).Length}.");
+            Object.DestroyImmediate(existingVisual.gameObject);
+            existingVisual = null;
+        }
         GameObject visual;
         if (existingVisual == null)
         {
@@ -207,6 +428,10 @@ public static class SeekerPresentationSetupTool
         StripDownloadedGameplayComponents(visual);
 
         Animator animator = visual.GetComponentInChildren<Animator>(true);
+        if (animator == null || !HasRealVisualMesh(visual))
+            throw new InvalidOperationException(
+                $"Cyber Soldier source '{AssetDatabase.GetAssetPath(source)}' did not produce " +
+                "an Animator and a real visual mesh.");
         if (animator != null) animator.applyRootMotion = false;
         Bounds originalBounds = CalculateWorldBounds(wrapper);
         CharacterController controller = seeker.GetComponent<CharacterController>();
@@ -230,14 +455,27 @@ public static class SeekerPresentationSetupTool
         Quaternion pivotRotation,
         string muzzlePointName)
     {
+        Transform existingPivot = FindDirectChild(parent, pivotName);
         GameObject pivot = EnsureChild(parent, pivotName);
-        pivot.transform.SetLocalPositionAndRotation(pivotPosition, pivotRotation);
-        pivot.transform.localScale = Vector3.one;
+        if (existingPivot == null)
+        {
+            pivot.transform.SetLocalPositionAndRotation(pivotPosition, pivotRotation);
+            pivot.transform.localScale = Vector3.one;
+        }
 
         GameObject gunRoot = EnsureChild(pivot.transform, gunName);
         gunRoot.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
         gunRoot.transform.localScale = Vector3.one;
         Transform existingMesh = FindDirectChild(gunRoot.transform, "GunMesh");
+        if (existingMesh != null &&
+            !TryCalculateVisualBounds(existingMesh.gameObject, out _, out string invalidDiagnostic))
+        {
+            Debug.LogWarning(
+                $"[SeekerPresentationSetup] Repairing invalid {gunName}/GunMesh.\n{invalidDiagnostic}");
+            Object.DestroyImmediate(existingMesh.gameObject);
+            existingMesh = null;
+        }
+
         GameObject mesh;
         if (existingMesh == null)
         {
@@ -247,16 +485,22 @@ public static class SeekerPresentationSetupTool
         else mesh = existingMesh.gameObject;
         mesh.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
         mesh.transform.localScale = Vector3.one;
+        mesh.SetActive(true);
         StripDownloadedGameplayComponents(mesh);
 
-        Bounds localBounds = CalculateBoundsInSpace(mesh, gunRoot.transform);
+        if (!TryCalculateVisualBoundsInSpace(mesh, gunRoot.transform, out Bounds localBounds,
+                out string rebuildDiagnostic))
+            throw new InvalidOperationException(
+                $"{gunName} visual hierarchy could not be measured after instantiating '{AssetDatabase.GetAssetPath(source)}'.\n" +
+                rebuildDiagnostic);
         Vector3 size = localBounds.size;
         if (size.x >= size.y && size.x >= size.z)
             mesh.transform.localRotation = Quaternion.Euler(0f, -90f, 0f);
         else if (size.y >= size.x && size.y >= size.z)
             mesh.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
 
-        localBounds = CalculateBoundsInSpace(mesh, gunRoot.transform);
+        if (!TryCalculateVisualBoundsInSpace(mesh, gunRoot.transform, out localBounds, out rebuildDiagnostic))
+            throw new InvalidOperationException($"{gunName} bounds failed after orientation.\n{rebuildDiagnostic}");
         float length = Mathf.Max(localBounds.size.x, localBounds.size.y, localBounds.size.z);
         float sourceLength = length;
         float parentScale = Mathf.Max(
@@ -265,9 +509,11 @@ public static class SeekerPresentationSetupTool
             Mathf.Abs(pivot.transform.lossyScale.z));
         float targetLocalLength = targetLength / Mathf.Max(parentScale, 0.0001f);
         if (length > 0.001f) mesh.transform.localScale = Vector3.one * (targetLocalLength / length);
-        localBounds = CalculateBoundsInSpace(mesh, gunRoot.transform);
+        if (!TryCalculateVisualBoundsInSpace(mesh, gunRoot.transform, out localBounds, out rebuildDiagnostic))
+            throw new InvalidOperationException($"{gunName} bounds failed after absolute scale assignment.\n{rebuildDiagnostic}");
         mesh.transform.localPosition -= new Vector3(localBounds.center.x, localBounds.center.y, localBounds.min.z);
-        localBounds = CalculateBoundsInSpace(mesh, gunRoot.transform);
+        if (!TryCalculateVisualBoundsInSpace(mesh, gunRoot.transform, out localBounds, out rebuildDiagnostic))
+            throw new InvalidOperationException($"{gunName} bounds failed after centering.\n{rebuildDiagnostic}");
 
         if (!string.IsNullOrEmpty(muzzlePointName))
         {
@@ -362,7 +608,10 @@ public static class SeekerPresentationSetupTool
         out Transform rightHandGrip,
         out Transform leftHandGrip)
     {
-        Bounds bounds = CalculateBoundsInSpace(worldGun, worldGun.transform);
+        if (!TryCalculateVisualBoundsInSpace(
+                worldGun, worldGun.transform, out Bounds bounds, out string diagnostic))
+            throw new InvalidOperationException(
+                $"{worldGun.name} grip configuration requires a real visual mesh.\n{diagnostic}");
         GameObject right = EnsureChild(worldGun.transform, "RightHandGrip");
         right.transform.localPosition = new Vector3(
             0f,
@@ -386,16 +635,26 @@ public static class SeekerPresentationSetupTool
     {
         Transform mesh = FindDirectChild(gunRoot.transform, "GunMesh");
         if (mesh == null) throw new InvalidOperationException($"{gunRoot.name} has no GunMesh.");
-        Bounds before = CalculateWorldMeshBounds(gunRoot);
+        Vector3 baseLocalScale = Vector3.one;
+        mesh.localScale = baseLocalScale;
+        if (!TryCalculateVisualBounds(gunRoot, out Bounds before, out string beforeDiagnostic))
+            throw new InvalidOperationException(
+                $"{gunRoot.name} bounds failed before fit.\n{beforeDiagnostic}");
         float beforeMax = Mathf.Max(before.size.x, before.size.y, before.size.z);
-        if (beforeMax <= 0.001f) throw new InvalidOperationException($"{gunRoot.name} has no measurable mesh bounds.");
-        mesh.localScale *= targetWorldDimension / beforeMax;
+        mesh.localScale = Vector3.Scale(
+            baseLocalScale,
+            Vector3.one * (targetWorldDimension / beforeMax));
 
-        Bounds localBounds = CalculateBoundsInSpace(mesh.gameObject, gunRoot.transform);
+        if (!TryCalculateVisualBoundsInSpace(
+                mesh.gameObject, gunRoot.transform, out Bounds localBounds, out string localDiagnostic))
+            throw new InvalidOperationException(
+                $"{gunRoot.name} local bounds failed after fit.\n{localDiagnostic}");
         Transform muzzle = FindDirectOrDescendant(gunRoot.transform, muzzlePointName);
         if (muzzle != null)
             muzzle.localPosition = new Vector3(0f, 0f, localBounds.max.z + 0.01f);
-        Bounds after = CalculateWorldMeshBounds(gunRoot);
+        if (!TryCalculateVisualBounds(gunRoot, out Bounds after, out string afterDiagnostic))
+            throw new InvalidOperationException(
+                $"{gunRoot.name} bounds failed after fit.\n{afterDiagnostic}");
         Debug.Log($"[SeekerPresentationSetup] {gunRoot.name} final world mesh bounds: before={before.size:F4} ({beforeMax:F4}m), after={after.size:F4} ({Mathf.Max(after.size.x, after.size.y, after.size.z):F4}m)");
     }
 
@@ -437,6 +696,7 @@ public static class SeekerPresentationSetupTool
         DestroyChildrenNamed(muzzlePoint, "MuzzleFlashParticle");
         GameObject particleObject = new GameObject("MuzzleFlashParticle", typeof(ParticleSystem));
         particleObject.transform.SetParent(muzzlePoint, false);
+        particleObject.layer = muzzlePoint.gameObject.layer;
         ParticleSystem particle = particleObject.GetComponent<ParticleSystem>();
         ParticleSystem.MainModule main = particle.main;
         main.playOnAwake = false;
@@ -470,6 +730,7 @@ public static class SeekerPresentationSetupTool
         DestroyChildrenNamed(muzzlePoint, "MuzzleLight");
         GameObject lightObject = new GameObject("MuzzleLight", typeof(Light));
         lightObject.transform.SetParent(muzzlePoint, false);
+        lightObject.layer = muzzlePoint.gameObject.layer;
         Light light = lightObject.GetComponent<Light>();
         light.type = LightType.Point;
         light.color = new Color(0.2f, 0.9f, 1f, 1f);
@@ -522,6 +783,209 @@ public static class SeekerPresentationSetupTool
         }
     }
 
+    private static Dictionary<HumanBodyBones, Transform> AuditHumanoidBones(Animator animator)
+    {
+        if (animator == null || !animator.isHuman)
+            throw new InvalidOperationException(
+                "Cyber Soldier must use a valid Humanoid avatar for Animation Rigging.");
+
+        HumanBodyBones[] required =
+        {
+            HumanBodyBones.Hips,
+            HumanBodyBones.Spine,
+            HumanBodyBones.Chest,
+            HumanBodyBones.LeftShoulder,
+            HumanBodyBones.LeftUpperArm,
+            HumanBodyBones.LeftLowerArm,
+            HumanBodyBones.LeftHand,
+            HumanBodyBones.RightShoulder,
+            HumanBodyBones.RightUpperArm,
+            HumanBodyBones.RightLowerArm,
+            HumanBodyBones.RightHand
+        };
+        Dictionary<HumanBodyBones, Transform> result =
+            new Dictionary<HumanBodyBones, Transform>();
+        foreach (HumanBodyBones bone in required)
+        {
+            Transform transform = animator.GetBoneTransform(bone);
+            if (transform == null)
+                throw new InvalidOperationException(
+                    $"Cyber Soldier Humanoid avatar has no mapped {bone} bone.");
+            result.Add(bone, transform);
+            Debug.Log(
+                $"[SeekerPresentationSetup] Humanoid bone {bone}={GetHierarchyPath(transform)}");
+        }
+        return result;
+    }
+
+    private static void ConfigureWeaponRig(
+        Transform seeker,
+        Animator animator,
+        Transform chest,
+        Transform leftUpperArm,
+        Transform leftLowerArm,
+        Transform leftHand,
+        Transform rightUpperArm,
+        Transform rightLowerArm,
+        Transform rightHand,
+        Transform rightHandGrip,
+        Transform leftHandGrip,
+        out Rig weaponRig,
+        out TwoBoneIKConstraint rightArmIk,
+        out TwoBoneIKConstraint leftArmIk,
+        out MultiAimConstraint upperBodyAim,
+        out Transform aiAimTarget,
+        out Transform rightHandIkTarget)
+    {
+        GameObject aimTargetObject = EnsureChild(seeker, "SeekerAIAimTarget");
+        aiAimTarget = aimTargetObject.transform;
+        aiAimTarget.SetPositionAndRotation(
+            seeker.position + seeker.forward * 12f + Vector3.up * 1.35f,
+            seeker.rotation);
+        aiAimTarget.localScale = Vector3.one;
+
+        RigBuilder rigBuilder = GetOrAddUniqueComponent<RigBuilder>(animator.gameObject);
+        GameObject rigObject = EnsureChild(animator.transform, "WeaponRig");
+        rigObject.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
+        rigObject.transform.localScale = Vector3.one;
+        weaponRig = GetOrAddUniqueComponent<Rig>(rigObject);
+        weaponRig.weight = 1f;
+
+        GameObject targetsObject = EnsureChild(rigObject.transform, "WeaponRigTargets");
+        targetsObject.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
+        targetsObject.transform.localScale = Vector3.one;
+
+        Transform rightTarget = EnsureChild(
+            targetsObject.transform, "RightHandIKTarget").transform;
+        rightHandIkTarget = rightTarget;
+        Vector3 gripSeparation = leftHandGrip.position - rightHandGrip.position;
+        float leftArmReach =
+            Vector3.Distance(leftUpperArm.position, leftLowerArm.position) +
+            Vector3.Distance(leftLowerArm.position, leftHand.position);
+        Vector3 desiredLeftGrip =
+            leftUpperArm.position +
+            seeker.forward * (leftArmReach * 0.58f) +
+            seeker.right * (leftArmReach * 0.28f) -
+            seeker.up * (leftArmReach * 0.25f);
+        rightTarget.SetPositionAndRotation(
+            desiredLeftGrip - gripSeparation,
+            rightHand.rotation);
+        rightTarget.localScale = Vector3.one;
+
+        Transform rightHint = EnsureChild(
+            targetsObject.transform, "RightElbowHint").transform;
+        rightHint.SetPositionAndRotation(
+            rightUpperArm.position + seeker.right * 0.32f +
+            Vector3.down * 0.25f + seeker.forward * 0.03f,
+            rightUpperArm.rotation);
+        rightHint.localScale = Vector3.one;
+
+        Transform leftHint = EnsureChild(
+            targetsObject.transform, "LeftElbowHint").transform;
+        leftHint.SetPositionAndRotation(
+            leftUpperArm.position - seeker.right * 0.32f +
+            Vector3.down * 0.25f + seeker.forward * 0.03f,
+            leftUpperArm.rotation);
+        leftHint.localScale = Vector3.one;
+
+        GameObject aimObject = EnsureChild(rigObject.transform, "UpperBodyAim");
+        upperBodyAim = GetOrAddUniqueComponent<MultiAimConstraint>(aimObject);
+        MultiAimConstraintData aimData = upperBodyAim.data;
+        aimData.constrainedObject = chest;
+        WeightedTransformArray aimSources = new WeightedTransformArray(0);
+        aimSources.Add(new WeightedTransform(aiAimTarget, 1f));
+        aimData.sourceObjects = aimSources;
+        aimData.maintainOffset = true;
+        aimData.offset = Vector3.zero;
+        aimData.limits = new Vector2(-35f, 35f);
+        aimData.aimAxis = SelectDominantAxis(
+            chest.InverseTransformDirection(seeker.forward));
+        aimData.upAxis = SelectDominantAxis(
+            chest.InverseTransformDirection(Vector3.up));
+        aimData.worldUpType = MultiAimConstraintData.WorldUpType.SceneUp;
+        aimData.worldUpAxis = MultiAimConstraintData.Axis.Y;
+        aimData.worldUpObject = null;
+        aimData.constrainedXAxis = true;
+        aimData.constrainedYAxis = true;
+        aimData.constrainedZAxis = false;
+        upperBodyAim.data = aimData;
+        upperBodyAim.weight = 0.15f;
+
+        GameObject rightIkObject = EnsureChild(rigObject.transform, "RightArmIK");
+        rightArmIk = GetOrAddUniqueComponent<TwoBoneIKConstraint>(rightIkObject);
+        ConfigureTwoBoneIk(
+            rightArmIk,
+            rightUpperArm,
+            rightLowerArm,
+            rightHand,
+            rightTarget,
+            rightHint);
+
+        GameObject leftIkObject = EnsureChild(rigObject.transform, "LeftArmIK");
+        leftArmIk = GetOrAddUniqueComponent<TwoBoneIKConstraint>(leftIkObject);
+        ConfigureTwoBoneIk(
+            leftArmIk,
+            leftUpperArm,
+            leftLowerArm,
+            leftHand,
+            leftHandGrip,
+            leftHint);
+
+        aimObject.transform.SetSiblingIndex(0);
+        rightIkObject.transform.SetSiblingIndex(1);
+        leftIkObject.transform.SetSiblingIndex(2);
+        targetsObject.transform.SetSiblingIndex(3);
+        rigBuilder.layers.Clear();
+        rigBuilder.layers.Add(new RigLayer(weaponRig, true));
+        EditorUtility.SetDirty(rigBuilder);
+        EditorUtility.SetDirty(weaponRig);
+        EditorUtility.SetDirty(upperBodyAim);
+        EditorUtility.SetDirty(rightArmIk);
+        EditorUtility.SetDirty(leftArmIk);
+    }
+
+    private static void ConfigureTwoBoneIk(
+        TwoBoneIKConstraint constraint,
+        Transform root,
+        Transform mid,
+        Transform tip,
+        Transform target,
+        Transform hint)
+    {
+        TwoBoneIKConstraintData data = constraint.data;
+        data.root = root;
+        data.mid = mid;
+        data.tip = tip;
+        data.target = target;
+        data.hint = hint;
+        data.targetPositionWeight = 1f;
+        data.targetRotationWeight = 1f;
+        data.hintWeight = 1f;
+        data.maintainTargetPositionOffset = false;
+        data.maintainTargetRotationOffset = false;
+        constraint.data = data;
+        constraint.weight = 1f;
+    }
+
+    private static MultiAimConstraintData.Axis SelectDominantAxis(Vector3 direction)
+    {
+        direction.Normalize();
+        float x = Mathf.Abs(direction.x);
+        float y = Mathf.Abs(direction.y);
+        float z = Mathf.Abs(direction.z);
+        if (x >= y && x >= z)
+            return direction.x >= 0f
+                ? MultiAimConstraintData.Axis.X
+                : MultiAimConstraintData.Axis.X_NEG;
+        if (y >= x && y >= z)
+            return direction.y >= 0f
+                ? MultiAimConstraintData.Axis.Y
+                : MultiAimConstraintData.Axis.Y_NEG;
+        return direction.z >= 0f
+            ? MultiAimConstraintData.Axis.Z
+            : MultiAimConstraintData.Axis.Z_NEG;
+    }
+
     private static Transform FindRightHand(Animator animator, Transform root)
     {
         if (animator != null && animator.isHuman)
@@ -565,7 +1029,12 @@ public static class SeekerPresentationSetupTool
         foreach (Camera item in root.GetComponentsInChildren<Camera>(true)) Object.DestroyImmediate(item);
         foreach (AudioListener item in root.GetComponentsInChildren<AudioListener>(true)) Object.DestroyImmediate(item);
         foreach (MonoBehaviour item in root.GetComponentsInChildren<MonoBehaviour>(true))
-            if (!(item is SeekerWeaponGripController)) Object.DestroyImmediate(item);
+            if (!(item is SeekerWeaponGripController) &&
+                !(item is RigBuilder) &&
+                !(item is Rig) &&
+                !(item is TwoBoneIKConstraint) &&
+                !(item is MultiAimConstraint))
+                Object.DestroyImmediate(item);
     }
 
     private static Bounds CalculateWorldBounds(GameObject root)
@@ -577,42 +1046,277 @@ public static class SeekerPresentationSetupTool
         return bounds;
     }
 
-    private static Bounds CalculateWorldMeshBounds(GameObject root)
+    public static bool TryCalculateVisualBounds(
+        GameObject visualRoot,
+        out Bounds bounds,
+        out string diagnostic)
     {
-        Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true)
-            .Where(renderer => !(renderer is ParticleSystemRenderer))
-            .ToArray();
-        if (renderers.Length == 0) return new Bounds(root.transform.position, Vector3.zero);
-        Bounds bounds = renderers[0].bounds;
-        for (int i = 1; i < renderers.Length; i++) bounds.Encapsulate(renderers[i].bounds);
-        return bounds;
-    }
-
-    private static Bounds CalculateBoundsInSpace(GameObject root, Transform space)
-    {
-        Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
-        bool initialized = false;
-        Bounds result = default;
-        foreach (Renderer renderer in renderers)
+        bounds = visualRoot != null
+            ? new Bounds(visualRoot.transform.position, Vector3.zero)
+            : default;
+        if (visualRoot == null)
         {
-            Bounds world = renderer.bounds;
-            Vector3 min = world.min;
-            Vector3 max = world.max;
-            for (int x = 0; x < 2; x++)
-            for (int y = 0; y < 2; y++)
-            for (int z = 0; z < 2; z++)
+            diagnostic = "Visual root: <null>";
+            return false;
+        }
+
+        MeshRenderer[] meshRenderers = visualRoot.GetComponentsInChildren<MeshRenderer>(true);
+        SkinnedMeshRenderer[] skinnedRenderers =
+            visualRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+        MeshFilter[] meshFilters = visualRoot.GetComponentsInChildren<MeshFilter>(true);
+        StringBuilder details = new StringBuilder();
+        details.AppendLine($"Root path: {GetHierarchyPath(visualRoot.transform)}");
+        details.AppendLine($"ActiveSelf: {visualRoot.activeSelf}");
+        details.AppendLine($"ActiveInHierarchy: {visualRoot.activeInHierarchy}");
+        details.AppendLine($"LocalScale: {visualRoot.transform.localScale:F6}");
+        details.AppendLine($"LossyScale: {visualRoot.transform.lossyScale:F6}");
+        details.AppendLine($"Child count: {visualRoot.transform.childCount}");
+        details.AppendLine($"MeshRenderers: {meshRenderers.Length}");
+        details.AppendLine($"SkinnedMeshRenderers: {skinnedRenderers.Length}");
+        details.AppendLine($"MeshFilters: {meshFilters.Length}");
+        details.AppendLine($"Source prefab: {SourceGunAssetPath}");
+
+        bool initialized = false;
+        foreach (MeshRenderer renderer in meshRenderers)
+        {
+            if (renderer == null || IsVisualHelper(renderer.transform, visualRoot.transform))
+                continue;
+            MeshFilter filter = renderer.GetComponent<MeshFilter>();
+            Mesh mesh = filter != null ? filter.sharedMesh : null;
+            details.AppendLine(
+                $"MeshRenderer path={GetHierarchyPath(renderer.transform)}, enabled={renderer.enabled}, " +
+                $"mesh={DescribeMesh(mesh)}, bounds={renderer.bounds.size:F6}");
+            if (mesh == null || mesh.vertexCount <= 0) continue;
+            if (IsValidBounds(renderer.bounds))
             {
-                Vector3 corner = new Vector3(x == 0 ? min.x : max.x, y == 0 ? min.y : max.y, z == 0 ? min.z : max.z);
-                Vector3 local = space.InverseTransformPoint(corner);
-                if (!initialized)
-                {
-                    result = new Bounds(local, Vector3.zero);
-                    initialized = true;
-                }
-                else result.Encapsulate(local);
+                Encapsulate(ref bounds, renderer.bounds, ref initialized);
+            }
+            else
+            {
+                Bounds fallback = TransformBounds(filter.transform, mesh.bounds);
+                if (IsValidBounds(fallback))
+                    Encapsulate(ref bounds, fallback, ref initialized);
             }
         }
-        return result;
+
+        foreach (SkinnedMeshRenderer renderer in skinnedRenderers)
+        {
+            if (renderer == null || IsVisualHelper(renderer.transform, visualRoot.transform))
+                continue;
+            Mesh mesh = renderer.sharedMesh;
+            details.AppendLine(
+                $"SkinnedMeshRenderer path={GetHierarchyPath(renderer.transform)}, enabled={renderer.enabled}, " +
+                $"mesh={DescribeMesh(mesh)}, worldBounds={renderer.bounds.size:F6}, " +
+                $"localBounds={renderer.localBounds.size:F6}");
+            if (mesh == null || mesh.vertexCount <= 0) continue;
+            Bounds candidate = IsValidBounds(renderer.bounds)
+                ? renderer.bounds
+                : TransformBounds(renderer.transform, renderer.localBounds);
+            if (IsValidBounds(candidate))
+                Encapsulate(ref bounds, candidate, ref initialized);
+        }
+
+        // A prefab instance can have a valid MeshFilter while Editor renderer
+        // bounds are not initialized yet. Use mesh-local bounds without waiting a frame.
+        foreach (MeshFilter filter in meshFilters)
+        {
+            if (filter == null || IsVisualHelper(filter.transform, visualRoot.transform))
+                continue;
+            Mesh mesh = filter.sharedMesh;
+            MeshRenderer pairedRenderer = filter.GetComponent<MeshRenderer>();
+            details.AppendLine(
+                $"MeshFilter path={GetHierarchyPath(filter.transform)}, mesh={DescribeMesh(mesh)}, " +
+                $"renderer={(pairedRenderer != null ? pairedRenderer.enabled.ToString() : "<missing>")}");
+            if (mesh == null || mesh.vertexCount <= 0) continue;
+            Bounds fallback = TransformBounds(filter.transform, mesh.bounds);
+            if (IsValidBounds(fallback))
+                Encapsulate(ref bounds, fallback, ref initialized);
+        }
+
+        diagnostic = details.ToString();
+        return initialized && IsValidBounds(bounds);
+    }
+
+    private static bool TryCalculateVisualBoundsInSpace(
+        GameObject visualRoot,
+        Transform space,
+        out Bounds bounds,
+        out string diagnostic)
+    {
+        bounds = default;
+        if (visualRoot == null || space == null)
+        {
+            diagnostic =
+                $"Visual root: {(visualRoot != null ? GetHierarchyPath(visualRoot.transform) : "<null>")}\n" +
+                $"Measurement space: {(space != null ? GetHierarchyPath(space) : "<null>")}";
+            return false;
+        }
+
+        bool initialized = false;
+        Bounds result = default;
+        MeshFilter[] filters = visualRoot.GetComponentsInChildren<MeshFilter>(true);
+        SkinnedMeshRenderer[] skinnedRenderers =
+            visualRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+        StringBuilder details = new StringBuilder();
+        details.AppendLine($"Root path: {GetHierarchyPath(visualRoot.transform)}");
+        details.AppendLine($"Measurement space: {GetHierarchyPath(space)}");
+        details.AppendLine($"MeshFilters: {filters.Length}");
+        details.AppendLine($"SkinnedMeshRenderers: {skinnedRenderers.Length}");
+
+        foreach (MeshFilter filter in filters)
+        {
+            if (filter == null || IsVisualHelper(filter.transform, visualRoot.transform))
+                continue;
+            Mesh mesh = filter.sharedMesh;
+            details.AppendLine(
+                $"MeshFilter path={GetHierarchyPath(filter.transform)}, mesh={DescribeMesh(mesh)}");
+            if (mesh == null || mesh.vertexCount <= 0) continue;
+            EncapsulateTransformedBounds(
+                mesh.bounds, filter.transform, space, ref result, ref initialized);
+        }
+
+        foreach (SkinnedMeshRenderer renderer in skinnedRenderers)
+        {
+            if (renderer == null || IsVisualHelper(renderer.transform, visualRoot.transform))
+                continue;
+            Mesh mesh = renderer.sharedMesh;
+            details.AppendLine(
+                $"SkinnedMeshRenderer path={GetHierarchyPath(renderer.transform)}, " +
+                $"mesh={DescribeMesh(mesh)}, localBounds={renderer.localBounds.size:F6}");
+            if (mesh == null || mesh.vertexCount <= 0) continue;
+            Bounds sourceBounds = IsValidBounds(renderer.localBounds)
+                ? renderer.localBounds
+                : mesh.bounds;
+            EncapsulateTransformedBounds(
+                sourceBounds, renderer.transform, space, ref result, ref initialized);
+        }
+
+        bounds = result;
+        diagnostic = details.ToString();
+        return initialized && IsValidBounds(bounds);
+    }
+
+    private static void EncapsulateTransformedBounds(
+        Bounds sourceBounds,
+        Transform source,
+        Transform destination,
+        ref Bounds aggregate,
+        ref bool initialized)
+    {
+        Bounds result = aggregate;
+        bool hasBounds = initialized;
+        ForEachBoundsCorner(sourceBounds, corner =>
+        {
+            Vector3 point = destination.InverseTransformPoint(source.TransformPoint(corner));
+            if (!hasBounds)
+            {
+                result = new Bounds(point, Vector3.zero);
+                hasBounds = true;
+            }
+            else
+            {
+                result.Encapsulate(point);
+            }
+        });
+        aggregate = result;
+        initialized = hasBounds;
+    }
+
+    private static Bounds TransformBounds(Transform source, Bounds localBounds)
+    {
+        Bounds world = default;
+        bool initialized = false;
+        ForEachBoundsCorner(localBounds, corner =>
+        {
+            Vector3 point = source.TransformPoint(corner);
+            if (!initialized)
+            {
+                world = new Bounds(point, Vector3.zero);
+                initialized = true;
+            }
+            else
+            {
+                world.Encapsulate(point);
+            }
+        });
+        return world;
+    }
+
+    private static void ForEachBoundsCorner(Bounds source, Action<Vector3> visitor)
+    {
+        Vector3 min = source.min;
+        Vector3 max = source.max;
+        for (int x = 0; x < 2; x++)
+        for (int y = 0; y < 2; y++)
+        for (int z = 0; z < 2; z++)
+            visitor(new Vector3(
+                x == 0 ? min.x : max.x,
+                y == 0 ? min.y : max.y,
+                z == 0 ? min.z : max.z));
+    }
+
+    private static void Encapsulate(
+        ref Bounds aggregate,
+        Bounds candidate,
+        ref bool initialized)
+    {
+        if (!initialized)
+        {
+            aggregate = candidate;
+            initialized = true;
+        }
+        else
+        {
+            aggregate.Encapsulate(candidate);
+        }
+    }
+
+    private static bool IsVisualHelper(Transform item, Transform root)
+    {
+        while (item != null && item != root)
+        {
+            string lower = item.name.ToLowerInvariant();
+            if (lower.Contains("muzzle") || lower.Contains("grip") ||
+                lower.Contains("helper") || lower.Contains("gizmo") ||
+                lower.Contains("particle") || lower.Contains("vfx"))
+                return true;
+            item = item.parent;
+        }
+        return false;
+    }
+
+    private static bool HasRealVisualMesh(GameObject root)
+    {
+        if (root == null) return false;
+        return root.GetComponentsInChildren<MeshFilter>(true)
+                   .Any(filter => filter.sharedMesh != null &&
+                                  filter.sharedMesh.vertexCount > 0) ||
+               root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                   .Any(renderer => renderer.sharedMesh != null &&
+                                    renderer.sharedMesh.vertexCount > 0);
+    }
+
+    private static bool IsValidBounds(Bounds value)
+    {
+        return IsFinite(value.center) && IsFinite(value.size) &&
+               Mathf.Max(Mathf.Abs(value.size.x), Mathf.Abs(value.size.y),
+                   Mathf.Abs(value.size.z)) > VisualBoundsEpsilon;
+    }
+
+    private static bool IsFinite(Vector3 value)
+    {
+        return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+    }
+
+    private static bool IsFinite(float value)
+    {
+        return !float.IsNaN(value) && !float.IsInfinity(value);
+    }
+
+    private static string DescribeMesh(Mesh mesh)
+    {
+        if (mesh == null) return "<missing>";
+        return $"{mesh.name} vertices={mesh.vertexCount} asset={AssetDatabase.GetAssetPath(mesh)}";
     }
 
     private static T FindAsset<T>(Func<string, bool> pathPredicate, string label) where T : Object

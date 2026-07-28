@@ -157,9 +157,19 @@ public class PropHuntRoundManager : MonoBehaviour
 
     public void EndRound()
     {
-        CurrentWinner = CountActualAliveHiders() > 0
+        EndRoundWithWinner(CountActualAliveHiders() > 0
             ? PropHuntRoundWinner.Hiders
-            : PropHuntRoundWinner.Seekers;
+            : PropHuntRoundWinner.Seekers);
+    }
+
+    public void EndRoundWithWinner(PropHuntRoundWinner winner)
+    {
+        if (CurrentState == PropHuntRoundState.Ended)
+        {
+            return;
+        }
+
+        CurrentWinner = winner;
         RemainingTime = 0f;
         SetState(PropHuntRoundState.Ended);
         SetSeekerMovementAllowed(true);

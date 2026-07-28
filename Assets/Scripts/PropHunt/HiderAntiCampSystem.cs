@@ -17,21 +17,24 @@ public enum HiderAntiCampAlertType
 public readonly struct HiderAntiCampAlertData
 {
     public HiderAntiCampAlertData(
-        Vector3 hiderPosition,
+        Vector3 alertPosition,
         float alertDuration,
         HiderAntiCampAlertType alertType,
-        float timestamp)
+        float timestamp,
+        float alertRadius = 5f)
     {
-        HiderPosition = hiderPosition;
+        AlertPosition = alertPosition;
         AlertDuration = alertDuration;
         AlertType = alertType;
         Timestamp = timestamp;
+        AlertRadius = Mathf.Max(0.1f, alertRadius);
     }
 
-    public Vector3 HiderPosition { get; }
+    public Vector3 AlertPosition { get; }
     public float AlertDuration { get; }
     public HiderAntiCampAlertType AlertType { get; }
     public float Timestamp { get; }
+    public float AlertRadius { get; }
 }
 
 public class HiderAntiCampSystem : MonoBehaviour

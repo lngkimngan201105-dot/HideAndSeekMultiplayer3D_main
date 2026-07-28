@@ -164,6 +164,16 @@ public class SeekerWeaponPresentation : MonoBehaviour
         }
     }
 
+    public void ConfigureWorldMuzzle(ParticleSystem configuredMuzzleFlash, Light configuredMuzzleLight)
+    {
+        muzzleFlash = configuredMuzzleFlash;
+        muzzleLight = configuredMuzzleLight;
+        if (muzzleLight != null)
+        {
+            muzzleLight.enabled = false;
+        }
+    }
+
     public void SpawnImpact(RaycastHit hit)
     {
         if (hit.collider == null || impactPrefab == null) return;
