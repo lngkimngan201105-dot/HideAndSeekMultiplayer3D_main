@@ -1,6 +1,7 @@
 using System;
 using StarterAssets;
 using UnityEngine;
+using UnityEngine.AI;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -474,6 +475,7 @@ public class PropTransformSystem : MonoBehaviour
 
         _currentPropVisual = candidatePivot;
         currentPropId = propDefinition.propId;
+        AddBlockingColliderToPropVisual(candidatePivot);
 
         if (previousVisual != null)
         {
@@ -645,6 +647,7 @@ public class PropTransformSystem : MonoBehaviour
         }
 
         _currentPropVisual = pivotObject;
+        AddBlockingColliderToPropVisual(pivotObject);
 
         currentPropId = prop.propId;
         currentState = PlayerDisguiseState.Disguised;
@@ -2570,6 +2573,45 @@ public class PropTransformSystem : MonoBehaviour
 
             behaviour.enabled = false;
             Destroy(behaviour);
+        }
+    }
+
+    private static void AddBlockingColliderToPropVisual(GameObject clone)
+    {
+        if (clone == null)
+        {
+            return;
+        }
+
+        Renderer[] renderers = clone.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0)
+        {
+            return;
+        }
+
+        Bounds worldBounds = CalculateRendererBounds(renderers);
+        BoxCollider collider = clone.AddComponent<BoxCollider>();
+        Vector3 localCenter = clone.transform.InverseTransformPoint(worldBounds.center);
+        Vector3 localSize = clone.transform.InverseTransformVector(worldBounds.size);
+        collider.center = localCenter;
+        collider.size = new Vector3(
+            Mathf.Max(0.35f, Mathf.Abs(localSize.x)),
+            Mathf.Max(0.35f, Mathf.Abs(localSize.y)),
+            Mathf.Max(0.35f, Mathf.Abs(localSize.z))
+        );
+        collider.isTrigger = false;
+
+        NavMeshObstacle obstacle = clone.AddComponent<NavMeshObstacle>();
+        obstacle.shape = NavMeshObstacleShape.Box;
+        obstacle.center = collider.center;
+        obstacle.size = collider.size;
+        obstacle.carving = true;
+        obstacle.carveOnlyStationary = false;
+
+        CharacterController ownerController = clone.GetComponentInParent<CharacterController>();
+        if (ownerController != null)
+        {
+            Physics.IgnoreCollision(collider, ownerController, true);
         }
     }
 
