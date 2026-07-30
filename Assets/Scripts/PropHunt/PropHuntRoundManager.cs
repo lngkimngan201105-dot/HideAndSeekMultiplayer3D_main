@@ -18,6 +18,21 @@ public enum PropHuntRoundWinner
     Seekers
 }
 
+public enum RoundOutcome
+{
+    None,
+    HiderWin,
+    SeekerWin
+}
+
+public enum RoundEndReason
+{
+    None,
+    TimerExpired,
+    AllSeekersEliminated,
+    HiderEliminated
+}
+
 public class PropHuntRoundManager : MonoBehaviour
 {
     [Header("Round timing")]
@@ -32,23 +47,33 @@ public class PropHuntRoundManager : MonoBehaviour
     [Header("Participants")]
     [SerializeField] private List<PropTransformSystem> players = new List<PropTransformSystem>();
     [SerializeField] private List<HiderAbilityController> hiderAbilities = new List<HiderAbilityController>();
+    [SerializeField] private SeekerTeamCoordinator seekerTeam;
 
     public int AliveHiderCount { get; private set; }
     public int SeekerCount { get; private set; }
     public float RemainingTime { get; private set; }
     public PropHuntRoundState CurrentState { get; private set; } = PropHuntRoundState.Waiting;
     public PropHuntRoundWinner CurrentWinner { get; private set; } = PropHuntRoundWinner.None;
+    public RoundOutcome CurrentOutcome { get; private set; } = RoundOutcome.None;
+    public RoundEndReason CurrentEndReason { get; private set; } = RoundEndReason.None;
     public float PreparationDuration => preparationDuration;
     public float HuntingDuration => huntingDuration;
 
     public event Action RoundDataChanged;
     public event Action RoundStarted;
     public event Action<PropHuntRoundState> RoundStateChanged;
+    public event Action<RoundOutcome, RoundEndReason> RoundEnded;
 
     public void ConfigureDurations(float configuredPreparationDuration, float configuredHuntingDuration)
     {
         preparationDuration = Mathf.Max(0f, configuredPreparationDuration);
         huntingDuration = Mathf.Max(0f, configuredHuntingDuration);
+    }
+
+    public void ConfigureSeekerTeam(SeekerTeamCoordinator configuredTeam)
+    {
+        seekerTeam = configuredTeam;
+        RefreshPlayerCounts();
     }
 
     private void Awake()
@@ -132,6 +157,9 @@ public class PropHuntRoundManager : MonoBehaviour
     public void StartRound()
     {
         CurrentWinner = PropHuntRoundWinner.None;
+        CurrentOutcome = RoundOutcome.None;
+        CurrentEndReason = RoundEndReason.None;
+        Time.timeScale = 1f;
         RemainingTime = preparationDuration;
         SetState(PropHuntRoundState.Preparation);
         SetSeekerMovementAllowed(false);
@@ -157,23 +185,46 @@ public class PropHuntRoundManager : MonoBehaviour
 
     public void EndRound()
     {
-        EndRoundWithWinner(CountActualAliveHiders() > 0
-            ? PropHuntRoundWinner.Hiders
-            : PropHuntRoundWinner.Seekers);
+        if (CountActualAliveHiders() > 0)
+            EndRound(RoundOutcome.HiderWin, RoundEndReason.TimerExpired);
+        else
+            EndRound(RoundOutcome.SeekerWin, RoundEndReason.HiderEliminated);
     }
 
     public void EndRoundWithWinner(PropHuntRoundWinner winner)
+    {
+        RoundOutcome outcome = winner == PropHuntRoundWinner.Hiders
+            ? RoundOutcome.HiderWin
+            : winner == PropHuntRoundWinner.Seekers
+                ? RoundOutcome.SeekerWin
+                : RoundOutcome.None;
+        RoundEndReason reason = outcome == RoundOutcome.HiderWin
+            ? RoundEndReason.TimerExpired
+            : outcome == RoundOutcome.SeekerWin
+                ? RoundEndReason.HiderEliminated
+                : RoundEndReason.None;
+        EndRound(outcome, reason);
+    }
+
+    public void EndRound(RoundOutcome outcome, RoundEndReason reason)
     {
         if (CurrentState == PropHuntRoundState.Ended)
         {
             return;
         }
 
-        CurrentWinner = winner;
+        CurrentOutcome = outcome;
+        CurrentEndReason = reason;
+        CurrentWinner = outcome == RoundOutcome.HiderWin
+            ? PropHuntRoundWinner.Hiders
+            : outcome == RoundOutcome.SeekerWin
+                ? PropHuntRoundWinner.Seekers
+                : PropHuntRoundWinner.None;
         RemainingTime = 0f;
         SetState(PropHuntRoundState.Ended);
-        SetSeekerMovementAllowed(true);
+        SetSeekerMovementAllowed(false);
         RoundDataChanged?.Invoke();
+        RoundEnded?.Invoke(CurrentOutcome, CurrentEndReason);
     }
 
     public void RefreshPlayerCounts()
@@ -205,7 +256,9 @@ public class PropHuntRoundManager : MonoBehaviour
         }
 
         int displayedHiders = actualHiders;
-        int displayedSeekers = usePreviewCounts ? previewSeekerCount : actualSeekers;
+        int displayedSeekers = seekerTeam != null
+            ? seekerTeam.AliveSeekerCount
+            : usePreviewCounts ? previewSeekerCount : actualSeekers;
 
         if (AliveHiderCount == displayedHiders && SeekerCount == displayedSeekers)
         {
@@ -289,6 +342,11 @@ public class PropHuntRoundManager : MonoBehaviour
         if (hiderAbilities.Count == 0)
         {
             hiderAbilities.AddRange(FindObjectsOfType<HiderAbilityController>(true));
+        }
+
+        if (seekerTeam == null)
+        {
+            seekerTeam = FindObjectOfType<SeekerTeamCoordinator>(true);
         }
     }
 }

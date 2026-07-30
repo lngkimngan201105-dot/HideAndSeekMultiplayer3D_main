@@ -89,6 +89,8 @@ public static class HiderCompleteHUDSetupTool
             return;
         }
 
+        ConfigureHiderJumpAndStartupAudio(hider);
+
         PropHuntRoundManager roundManager = GetOrCreateRoundManager();
         roundManager.ConfigureDurations(30f, 180f);
         HiderRosterManager rosterManager = GetOrAddComponent<HiderRosterManager>(roundManager.gameObject);
@@ -210,6 +212,114 @@ public static class HiderCompleteHUDSetupTool
             : "HiderCompleteHUDSetupTool: TMP font unavailable; outline skipped safely.");
         Debug.Log("HiderCompleteHUDSetupTool: Scene saved.");
         Debug.Log("HiderCompleteHUDSetupTool:\nHUD setup complete.");
+    }
+
+    [MenuItem("Tools/Prop Hunt/Fix Hider Jump And Startup Audio")]
+    public static void SetupHiderJumpAndStartupAudioOnly()
+    {
+        if (Application.isPlaying)
+        {
+            Debug.LogWarning("HiderCompleteHUDSetupTool: exit Play Mode before running jump/audio setup.");
+            return;
+        }
+
+        if (!OpenMapV2())
+        {
+            return;
+        }
+
+        PropTransformSystem hider = FindHiderInActiveScene();
+        if (hider == null)
+        {
+            throw new InvalidOperationException(
+                "HiderCompleteHUDSetupTool: Hider PlayerCapsule was not found.");
+        }
+
+        ConfigureHiderJumpAndStartupAudio(hider);
+        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+        EditorSceneManager.SaveScene(SceneManager.GetActiveScene(), MapV2Path);
+        AssetDatabase.SaveAssets();
+        Debug.Log(
+            "HiderJumpStartupAudioSetup: PASS — one Hider movement controller, " +
+            "visual physics removed, startup music disabled, Map_v2 saved.");
+    }
+
+    private static void ConfigureHiderJumpAndStartupAudio(PropTransformSystem hider)
+    {
+        GameObject player = hider.gameObject;
+        CharacterController characterController =
+            GetOrAddUniqueComponent<CharacterController>(player);
+        characterController.enabled = true;
+
+        FirstPersonController[] firstPersonControllers =
+            player.GetComponents<FirstPersonController>();
+        FirstPersonController movement = firstPersonControllers.FirstOrDefault();
+        if (movement == null)
+        {
+            movement = Undo.AddComponent<FirstPersonController>(player);
+        }
+
+        movement.enabled = true;
+        if (movement.Gravity >= 0f)
+        {
+            movement.Gravity = -15f;
+        }
+
+        for (int i = 1; i < firstPersonControllers.Length; i++)
+        {
+            firstPersonControllers[i].enabled = false;
+            EditorUtility.SetDirty(firstPersonControllers[i]);
+        }
+
+        foreach (ThirdPersonController duplicate in player.GetComponents<ThirdPersonController>())
+        {
+            duplicate.enabled = false;
+            EditorUtility.SetDirty(duplicate);
+        }
+
+        foreach (SeekerFirstPersonController duplicate in
+                 player.GetComponents<SeekerFirstPersonController>())
+        {
+            duplicate.enabled = false;
+            EditorUtility.SetDirty(duplicate);
+        }
+
+        if (hider.propVisualRoot != null)
+        {
+            foreach (Collider collider in
+                     hider.propVisualRoot.GetComponentsInChildren<Collider>(true))
+            {
+                Undo.DestroyObjectImmediate(collider);
+            }
+
+            foreach (Rigidbody body in
+                     hider.propVisualRoot.GetComponentsInChildren<Rigidbody>(true))
+            {
+                Undo.DestroyObjectImmediate(body);
+            }
+
+            foreach (Rigidbody2D body in
+                     hider.propVisualRoot.GetComponentsInChildren<Rigidbody2D>(true))
+            {
+                Undo.DestroyObjectImmediate(body);
+            }
+        }
+
+        foreach (AudioSource source in
+                 UnityEngine.Object.FindObjectsOfType<AudioSource>(true)
+                     .Where(source => source != null &&
+                                      source.gameObject.name == "Map2MusicPlayer"))
+        {
+            source.Stop();
+            source.playOnAwake = false;
+            source.loop = false;
+            source.clip = null;
+            EditorUtility.SetDirty(source);
+        }
+
+        EditorUtility.SetDirty(characterController);
+        EditorUtility.SetDirty(movement);
+        EditorUtility.SetDirty(hider);
     }
 
     private static bool OpenMapV2()

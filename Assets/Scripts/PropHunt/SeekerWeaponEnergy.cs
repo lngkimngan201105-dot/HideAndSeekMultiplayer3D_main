@@ -153,6 +153,11 @@ public class SeekerWeaponEnergy : MonoBehaviour
         EnergyChanged?.Invoke(currentCharges, maxCharges);
     }
 
+    public void CancelReloadForRoundEnd()
+    {
+        CancelReload(true);
+    }
+
 #if UNITY_EDITOR
     public void AdvanceReloadForValidation(float seconds)
     {

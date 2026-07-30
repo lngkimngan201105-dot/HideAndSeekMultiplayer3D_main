@@ -76,8 +76,10 @@ namespace StarterAssets
 		private bool _useDisguisedCameraRelativeMovement;
 		private Vector3 _lastValidGroundForward;
 		private Vector3 _lastValidGroundRight;
+		private readonly Collider[] _groundProbeHits = new Collider[16];
 		public bool IsControlLocked { get; private set; }
 		public bool IsCameraLookLocked { get; private set; }
+		public float VerticalVelocity => _verticalVelocity;
 
 		private const float _threshold = 0.01f;
 
@@ -97,6 +99,9 @@ namespace StarterAssets
 		{
 			TopClamp = 89.0f;
 			BottomClamp = -89.0f;
+			RotationSpeed = PlayerPrefs.GetFloat(
+				MainMenuSettingsController.MouseSensitivityKey,
+				RotationSpeed);
 
 			if (CinemachineCameraTarget == null)
 			{
@@ -146,8 +151,8 @@ namespace StarterAssets
 				return;
 			}
 
-			JumpAndGravity();
 			GroundedCheck();
+			JumpAndGravity();
 			Move();
 		}
 
@@ -207,11 +212,41 @@ namespace StarterAssets
 			_verticalVelocity = Mathf.Max(_verticalVelocity, velocity.y);
 		}
 
+		public CollisionFlags MoveCharacterBy(Vector3 displacement)
+		{
+			if (_controller == null)
+			{
+				_controller = GetComponent<CharacterController>();
+			}
+
+			return _controller != null && _controller.enabled
+				? _controller.Move(displacement)
+				: CollisionFlags.None;
+		}
+
 		private void GroundedCheck()
 		{
-			// set sphere position, with offset
 			Vector3 spherePosition = new Vector3(transform.position.x, transform.position.y - GroundedOffset, transform.position.z);
-			Grounded = Physics.CheckSphere(spherePosition, GroundedRadius, GroundLayers, QueryTriggerInteraction.Ignore);
+			int hitCount = Physics.OverlapSphereNonAlloc(
+				spherePosition,
+				GroundedRadius,
+				_groundProbeHits,
+				GroundLayers,
+				QueryTriggerInteraction.Ignore);
+
+			Grounded = false;
+			for (int i = 0; i < hitCount; i++)
+			{
+				Collider hit = _groundProbeHits[i];
+				_groundProbeHits[i] = null;
+				if (hit == null || hit.transform == transform || hit.transform.IsChildOf(transform))
+				{
+					continue;
+				}
+
+				Grounded = true;
+				break;
+			}
 		}
 
 		private void CameraRotation()
@@ -289,7 +324,7 @@ namespace StarterAssets
 				inputDirection.normalized * _speed +
 				_externalHorizontalVelocity +
 				new Vector3(0.0f, _verticalVelocity, 0.0f);
-			_controller.Move(movementVelocity * Time.deltaTime);
+			MoveCharacterBy(movementVelocity * Time.deltaTime);
 			_externalHorizontalVelocity = Vector3.MoveTowards(
 				_externalHorizontalVelocity,
 				Vector3.zero,
@@ -364,6 +399,9 @@ namespace StarterAssets
 
 		private void JumpAndGravity()
 		{
+			bool jumpRequested = _input.jump;
+			_input.jump = false;
+
 			if (Grounded)
 			{
 				// reset the fall timeout timer
@@ -376,7 +414,7 @@ namespace StarterAssets
 				}
 
 				// Jump
-				if (_input.jump && _jumpTimeoutDelta <= 0.0f)
+				if (jumpRequested && _jumpTimeoutDelta <= 0.0f)
 				{
 					// the square root of H * -2 * G = how much velocity needed to reach desired height
 					_verticalVelocity = Mathf.Sqrt(JumpHeight * -2f * Gravity);
@@ -399,15 +437,11 @@ namespace StarterAssets
 					_fallTimeoutDelta -= Time.deltaTime;
 				}
 
-				// if we are not grounded, do not jump
-				_input.jump = false;
 			}
 
-			// apply gravity over time if under terminal (multiply by delta time twice to linearly speed up over time)
-			if (_verticalVelocity < _terminalVelocity)
-			{
-				_verticalVelocity += Gravity * Time.deltaTime;
-			}
+			_verticalVelocity = Mathf.Max(
+				_verticalVelocity + Gravity * Time.deltaTime,
+				-_terminalVelocity);
 		}
 
 		private static float ClampAngle(float lfAngle, float lfMin, float lfMax)

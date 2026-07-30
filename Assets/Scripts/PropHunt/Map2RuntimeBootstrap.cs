@@ -13,8 +13,6 @@ public class Map2RuntimeBootstrap : MonoBehaviour
     private const string TargetSceneName = "Map_v2";
 
     private AudioSource _musicSource;
-    private AudioClip _menuMusic;
-    private AudioClip _matchMusic;
     private GameObject _menuRoot;
     private PropHuntRoundManager _roundManager;
 
@@ -67,22 +65,7 @@ public class Map2RuntimeBootstrap : MonoBehaviour
         EnsureRuntimeNavMeshBuilder();
         RepairInvisibleMapPieces();
         EnsureSeekerAI();
-        BuildMenu();
-        ConfigureMusic();
-        ShowMenu();
-    }
-
-    private void OnDestroy()
-    {
-        if (_menuMusic != null)
-        {
-            Destroy(_menuMusic);
-        }
-
-        if (_matchMusic != null)
-        {
-            Destroy(_matchMusic);
-        }
+        Time.timeScale = 1f;
     }
 
     private void EnsureEventSystem()
@@ -231,13 +214,11 @@ public class Map2RuntimeBootstrap : MonoBehaviour
         GameObject audioObject = new GameObject("Map2MusicPlayer");
         audioObject.transform.SetParent(transform, false);
         _musicSource = audioObject.AddComponent<AudioSource>();
-        _musicSource.loop = true;
+        _musicSource.loop = false;
         _musicSource.playOnAwake = false;
         _musicSource.spatialBlend = 0f;
         _musicSource.volume = 0.45f;
-
-        _menuMusic = GenerateMusicClip("Generated_Map2_MenuMusic", 96f, 0.28f);
-        _matchMusic = GenerateMusicClip("Generated_Map2_MatchMusic", 132f, 0.34f);
+        _musicSource.clip = null;
     }
 
     private void ShowMenu()
@@ -245,7 +226,7 @@ public class Map2RuntimeBootstrap : MonoBehaviour
         Time.timeScale = 0f;
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
-        PlayMusic(_menuMusic, 0.5f);
+        _musicSource.Stop();
         if (_menuRoot != null)
         {
             _menuRoot.SetActive(true);
@@ -266,26 +247,12 @@ public class Map2RuntimeBootstrap : MonoBehaviour
         PropHuntTestRoleSelector roleSelector = FindObjectOfType<PropHuntTestRoleSelector>(true);
         roleSelector?.ShowRoleSelection();
 
-        PlayMusic(_matchMusic, 0.38f);
     }
 
     private void QuitGame()
     {
         Time.timeScale = 1f;
         Application.Quit();
-    }
-
-    private void PlayMusic(AudioClip clip, float volume)
-    {
-        if (_musicSource == null || clip == null)
-        {
-            return;
-        }
-
-        _musicSource.Stop();
-        _musicSource.clip = clip;
-        _musicSource.volume = volume;
-        _musicSource.Play();
     }
 
     private static Canvas CreateCanvas(string name, int sortingOrder)
@@ -365,26 +332,4 @@ public class Map2RuntimeBootstrap : MonoBehaviour
         CreateText(buttonObject.transform, label, 24, FontStyle.Bold, Vector2.zero, rect.sizeDelta);
     }
 
-    private static AudioClip GenerateMusicClip(string name, float bpm, float volume)
-    {
-        const int sampleRate = 44100;
-        const float duration = 8f;
-        int sampleCount = Mathf.CeilToInt(sampleRate * duration);
-        float[] samples = new float[sampleCount];
-        float beat = bpm / 60f;
-
-        for (int i = 0; i < sampleCount; i++)
-        {
-            float time = i / (float)sampleRate;
-            float pulse = Mathf.Pow(Mathf.Max(0f, Mathf.Sin(time * beat * Mathf.PI)), 10f);
-            float bass = Mathf.Sin(2f * Mathf.PI * 55f * time) * (0.45f + pulse * 0.5f);
-            float tone = Mathf.Sin(2f * Mathf.PI * 220f * time) * 0.16f;
-            float high = Mathf.Sin(2f * Mathf.PI * 440f * time + Mathf.Sin(time * 2f)) * 0.08f;
-            samples[i] = (bass + tone + high) * volume;
-        }
-
-        AudioClip clip = AudioClip.Create(name, sampleCount, 1, sampleRate, false);
-        clip.SetData(samples, 0);
-        return clip;
-    }
 }

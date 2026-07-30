@@ -3,6 +3,7 @@ using UnityEngine.AI;
 
 public enum SeekerAIState
 {
+    Dormant,
     PreparationWait,
     Patrol,
     Observe,
@@ -27,6 +28,8 @@ public sealed class SeekerAIController : MonoBehaviour
     [SerializeField] private SeekerHealth seekerHealth;
     [SerializeField] private SeekerRaycastWeapon weapon;
     [SerializeField] private SeekerWeaponEnergy energy;
+    [SerializeField] private SeekerTeamCoordinator teamCoordinator;
+    [SerializeField] private SeekerTeamRole teamRole = SeekerTeamRole.PrimaryPursuer;
 
     [Header("Modules")]
     [SerializeField] private SeekerAINavigation navigation;
@@ -56,6 +59,13 @@ public sealed class SeekerAIController : MonoBehaviour
     private Quaternion observeCenterRotation;
     private SeekerAIState resumeAfterReload = SeekerAIState.Patrol;
     private bool hasLastKnownPosition;
+    private bool dormant;
+    private float fireAllowedAt;
+    private Renderer[] cachedRenderers;
+    private bool[] cachedRendererStates;
+    private Collider[] cachedColliders;
+    private bool[] cachedColliderStates;
+    private AudioSource[] cachedAudioSources;
 
     public SeekerAIState CurrentState { get; private set; } =
         SeekerAIState.PreparationWait;
@@ -68,6 +78,19 @@ public sealed class SeekerAIController : MonoBehaviour
     public float LostSightGrace => lostSightGrace;
     public float SearchDuration => searchDuration;
     public Vector2 PreferredAttackRange => preferredAttackRange;
+    public SeekerTeamRole TeamRole => teamRole;
+    public SeekerHealth Health => seekerHealth;
+    public SeekerWeaponEnergy Energy => energy;
+    public SeekerRaycastWeapon Weapon => weapon;
+    public SeekerAINavigation Navigation => navigation;
+    public SeekerAIPerception Perception => perception;
+    public SeekerAICombat Combat => combat;
+    public bool IsDormant => dormant;
+    public bool IsAlive => seekerHealth != null && seekerHealth.IsAlive;
+    public bool IsOperational => IsAlive && !dormant &&
+                                 CurrentState != SeekerAIState.Eliminated &&
+                                 CurrentState != SeekerAIState.RoundEnded;
+    public float FireAllowedAt => fireAllowedAt;
 
     public Vector3 ResolvePresentationAimPoint()
     {
@@ -121,6 +144,11 @@ public sealed class SeekerAIController : MonoBehaviour
 
     private void Update()
     {
+        if (dormant)
+        {
+            return;
+        }
+
         if (roundManager == null || seekerHealth == null ||
             !seekerHealth.IsAlive)
         {
@@ -131,7 +159,9 @@ public sealed class SeekerAIController : MonoBehaviour
 
         if (hiderHealth != null && !hiderHealth.IsAlive)
         {
-            roundManager.EndRoundWithWinner(PropHuntRoundWinner.Seekers);
+            roundManager.EndRound(
+                RoundOutcome.SeekerWin,
+                RoundEndReason.HiderEliminated);
             return;
         }
 
@@ -177,6 +207,154 @@ public sealed class SeekerAIController : MonoBehaviour
         combat = configuredCombat;
         suspicion = configuredSuspicion;
         if (isActiveAndEnabled) Subscribe();
+    }
+
+    public void ConfigureTeam(
+        SeekerTeamCoordinator configuredCoordinator,
+        SeekerTeamRole configuredRole,
+        bool startsDormant)
+    {
+        teamCoordinator = configuredCoordinator;
+        teamRole = configuredRole;
+        combat?.ConfigureTeam(configuredCoordinator, this);
+        if (!Application.isPlaying)
+        {
+            dormant = startsDormant;
+        }
+    }
+
+    public void ConfigureTuning(
+        float configuredReactionTime,
+        float configuredSearchDuration)
+    {
+        reactionTime = Mathf.Max(0f, configuredReactionTime);
+        searchDuration = Mathf.Max(0f, configuredSearchDuration);
+    }
+
+    public void SetDormant(bool value)
+    {
+        CacheDormancyComponents();
+        dormant = value;
+        weapon?.SetWeaponActive(false);
+        energy?.CancelReloadForRoundEnd();
+
+        NavMeshAgent agent = navigation != null ? navigation.Agent : null;
+        if (value)
+        {
+            navigation?.SetStopped(true);
+            if (agent != null) agent.enabled = false;
+            for (int i = 0; i < cachedRenderers.Length; i++)
+                cachedRenderers[i].enabled = false;
+            for (int i = 0; i < cachedColliders.Length; i++)
+                cachedColliders[i].enabled = false;
+            foreach (AudioSource source in cachedAudioSources)
+            {
+                source.Stop();
+                source.enabled = false;
+            }
+            ChangeState(SeekerAIState.Dormant);
+            return;
+        }
+
+        for (int i = 0; i < cachedRenderers.Length; i++)
+            cachedRenderers[i].enabled = cachedRendererStates[i];
+        for (int i = 0; i < cachedColliders.Length; i++)
+            cachedColliders[i].enabled = cachedColliderStates[i];
+        foreach (AudioSource source in cachedAudioSources)
+            source.enabled = true;
+        if (agent != null && seekerHealth != null && seekerHealth.IsAlive)
+            agent.enabled = true;
+    }
+
+    public void ActivateFromDormant(
+        Vector3 position,
+        Quaternion rotation,
+        float initialFireLock)
+    {
+        SetDormant(false);
+        transform.SetPositionAndRotation(position, rotation);
+        NavMeshAgent agent = navigation != null ? navigation.Agent : null;
+        if (agent != null && agent.enabled &&
+            NavMesh.SamplePosition(position, out NavMeshHit hit, 8f, NavMesh.AllAreas))
+        {
+            agent.Warp(hit.position);
+            transform.rotation = rotation;
+        }
+        fireAllowedAt = Time.time + Mathf.Max(0f, initialFireLock);
+        if (roundManager != null &&
+            roundManager.CurrentState == PropHuntRoundState.Hunting)
+        {
+            weapon?.SetWeaponActive(true);
+            ChangeState(SeekerAIState.Patrol);
+        }
+    }
+
+    public void ReceiveTeamSnapshot(
+        SeekerTeamSightingSnapshot snapshot,
+        Vector3 flankDestination)
+    {
+        if (!IsOperational || Time.time - snapshot.Timestamp > 2.5f) return;
+        lastKnownPosition = snapshot.ApproximatePosition;
+        lastKnownUpdatedAt = snapshot.Timestamp;
+        hasLastKnownPosition = true;
+        investigationSnapshot = flankDestination;
+        searchOrigin = snapshot.ApproximatePosition;
+        suspicionTarget = null;
+        navigation?.MoveTo(flankDestination, true);
+        ChangeState(SeekerAIState.Investigate);
+    }
+
+    public void ReceiveTeamInvestigation(Vector3 requested, float sampleRadius)
+    {
+        if (!IsOperational || navigation == null ||
+            !navigation.TrySampleReachable(
+                requested,
+                sampleRadius,
+                out investigationSnapshot))
+        {
+            return;
+        }
+
+        suspicion?.BuildInvestigation(investigationSnapshot);
+        suspicionTarget = null;
+        suspicionObservedAt = 0f;
+        ChangeState(SeekerAIState.Investigate);
+    }
+
+    public void ReceiveSpacingCorrection(Vector3 requested)
+    {
+        if (!IsOperational || CurrentState == SeekerAIState.Chase ||
+            CurrentState == SeekerAIState.Attack ||
+            CurrentState == SeekerAIState.Reloading)
+        {
+            return;
+        }
+
+        if (navigation != null &&
+            navigation.TrySampleReachable(requested, 4f, out Vector3 sampled))
+        {
+            navigation.MoveTo(sampled, false);
+        }
+    }
+
+    public bool TrySampleReachable(
+        Vector3 requested,
+        float radius,
+        out Vector3 sampled)
+    {
+        if (navigation != null)
+            return navigation.TrySampleReachable(requested, radius, out sampled);
+        sampled = requested;
+        return false;
+    }
+
+    public void StopForRoundEnd()
+    {
+        weapon?.SetWeaponActive(false);
+        energy?.CancelReloadForRoundEnd();
+        navigation?.SetStopped(true);
+        if (CurrentState != SeekerAIState.Eliminated)
+            ChangeState(SeekerAIState.RoundEnded);
     }
 
     private void TickState()
@@ -478,6 +656,7 @@ public sealed class SeekerAIController : MonoBehaviour
         searchOrigin = lastKnownPosition;
         hasLastKnownPosition = true;
         lastKnownUpdatedAt = Time.time;
+        teamCoordinator?.ReportSighting(this, lastKnownPosition);
     }
 
     private void SelectCombatState()
@@ -567,6 +746,7 @@ public sealed class SeekerAIController : MonoBehaviour
 
     private void HandleAntiCampAlert(HiderAntiCampAlertData alert)
     {
+        if (teamCoordinator != null) return;
         if (roundManager == null ||
             roundManager.CurrentState != PropHuntRoundState.Hunting ||
             CurrentState == SeekerAIState.Eliminated ||
@@ -621,23 +801,31 @@ public sealed class SeekerAIController : MonoBehaviour
             lastKnownUpdatedAt = float.NegativeInfinity;
             visibleEvidenceTime = 0f;
             lostSightTime = 0f;
-            ChangeState(SeekerAIState.PreparationWait);
+            ChangeState(dormant
+                ? SeekerAIState.Dormant
+                : SeekerAIState.PreparationWait);
         }
         else if (state == PropHuntRoundState.Hunting)
         {
+            if (dormant)
+            {
+                weapon?.SetWeaponActive(false);
+                ChangeState(SeekerAIState.Dormant);
+                return;
+            }
             weapon?.SetWeaponActive(true);
             ChangeState(SeekerAIState.Patrol);
         }
         else if (state == PropHuntRoundState.Ended)
         {
-            weapon?.SetWeaponActive(false);
-            if (CurrentState != SeekerAIState.Eliminated)
-                ChangeState(SeekerAIState.RoundEnded);
+            StopForRoundEnd();
         }
         else
         {
             weapon?.SetWeaponActive(false);
-            ChangeState(SeekerAIState.PreparationWait);
+            ChangeState(dormant
+                ? SeekerAIState.Dormant
+                : SeekerAIState.PreparationWait);
         }
     }
 
@@ -648,7 +836,9 @@ public sealed class SeekerAIController : MonoBehaviour
 
     private void HandleHiderEliminated(HiderHealth eliminatedHider)
     {
-        roundManager?.EndRoundWithWinner(PropHuntRoundWinner.Seekers);
+        roundManager?.EndRound(
+            RoundOutcome.SeekerWin,
+            RoundEndReason.HiderEliminated);
     }
 
     private void EliminateSeeker()
@@ -656,9 +846,10 @@ public sealed class SeekerAIController : MonoBehaviour
         if (CurrentState == SeekerAIState.Eliminated ||
             CurrentState == SeekerAIState.RoundEnded) return;
         weapon?.SetWeaponActive(false);
+        energy?.CancelReloadForRoundEnd();
         navigation?.SetStopped(true);
         ChangeState(SeekerAIState.Eliminated);
-        roundManager?.EndRoundWithWinner(PropHuntRoundWinner.Hiders);
+        teamCoordinator?.NotifySeekerEliminated(this);
     }
 
     private void BeginReloadState(SeekerAIState resume)
@@ -703,6 +894,7 @@ public sealed class SeekerAIController : MonoBehaviour
                 break;
 
             case SeekerAIState.Reloading:
+            case SeekerAIState.Dormant:
             case SeekerAIState.Eliminated:
             case SeekerAIState.RoundEnded:
             case SeekerAIState.PreparationWait:
@@ -740,6 +932,9 @@ public sealed class SeekerAIController : MonoBehaviour
         if (perception == null) perception = GetComponent<SeekerAIPerception>();
         if (combat == null) combat = GetComponent<SeekerAICombat>();
         if (suspicion == null) suspicion = GetComponent<SeekerAISuspicionSystem>();
+        if (teamCoordinator == null)
+            teamCoordinator = FindObjectOfType<SeekerTeamCoordinator>(true);
+        combat?.ConfigureTeam(teamCoordinator, this);
     }
 
     private void Subscribe()
@@ -776,5 +971,20 @@ public sealed class SeekerAIController : MonoBehaviour
             seekerHealth.HealthChanged -= HandleSeekerHealthChanged;
         if (hiderHealth != null)
             hiderHealth.Eliminated -= HandleHiderEliminated;
+    }
+
+    private void CacheDormancyComponents()
+    {
+        if (cachedRenderers != null) return;
+        cachedRenderers = GetComponentsInChildren<Renderer>(true);
+        cachedRendererStates = new bool[cachedRenderers.Length];
+        for (int i = 0; i < cachedRenderers.Length; i++)
+            cachedRendererStates[i] = cachedRenderers[i].enabled;
+
+        cachedColliders = GetComponentsInChildren<Collider>(true);
+        cachedColliderStates = new bool[cachedColliders.Length];
+        for (int i = 0; i < cachedColliders.Length; i++)
+            cachedColliderStates[i] = cachedColliders[i].enabled;
+        cachedAudioSources = GetComponentsInChildren<AudioSource>(true);
     }
 }

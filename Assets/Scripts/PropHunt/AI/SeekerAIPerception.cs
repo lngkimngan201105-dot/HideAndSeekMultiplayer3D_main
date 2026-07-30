@@ -28,6 +28,12 @@ public sealed class SeekerAIPerception : MonoBehaviour
         hasValidPriorSight = false;
     }
 
+    public void ConfigureTuning(float configuredViewDistance, float configuredFieldOfView)
+    {
+        viewDistance = Mathf.Max(0.1f, configuredViewDistance);
+        fieldOfView = Mathf.Clamp(configuredFieldOfView, 1f, 179f);
+    }
+
     public void Observe()
     {
         HasLineOfSight = false;

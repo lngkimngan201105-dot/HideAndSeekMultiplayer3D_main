@@ -475,8 +475,6 @@ public class PropTransformSystem : MonoBehaviour
 
         _currentPropVisual = candidatePivot;
         currentPropId = propDefinition.propId;
-        AddBlockingColliderToPropVisual(candidatePivot);
-
         if (previousVisual != null)
         {
             Destroy(previousVisual);
@@ -492,7 +490,7 @@ public class PropTransformSystem : MonoBehaviour
             propVisualRoot.rotation = candidateVisualRotation;
             _propVisualRotationOffset = candidateVisualRotation;
             _wallDistance = safeWallDistance;
-            _characterController.Move(safeWallPosition - transform.position);
+            _firstPersonController.MoveCharacterBy(safeWallPosition - transform.position);
             Physics.SyncTransforms();
         }
         else
@@ -647,8 +645,6 @@ public class PropTransformSystem : MonoBehaviour
         }
 
         _currentPropVisual = pivotObject;
-        AddBlockingColliderToPropVisual(pivotObject);
-
         currentPropId = prop.propId;
         currentState = PlayerDisguiseState.Disguised;
         IsWallAttached = false;
@@ -966,7 +962,7 @@ public class PropTransformSystem : MonoBehaviour
         }
 
         Vector3 originalPlayerPosition = transform.position;
-        _characterController.Move(safePlayerPosition - transform.position);
+        _firstPersonController.MoveCharacterBy(safePlayerPosition - transform.position);
         Physics.SyncTransforms();
         if (!CanUseWallPose(
                 transform.position,
@@ -976,7 +972,7 @@ public class PropTransformSystem : MonoBehaviour
                 wallHit.point,
                 attachNormal))
         {
-            _characterController.Move(originalPlayerPosition - transform.position);
+            _firstPersonController.MoveCharacterBy(originalPlayerPosition - transform.position);
             _wallUserRotationDegrees = previousUserRotation;
             propVisualRoot.rotation = previousVisualRotation;
             Debug.Log("Wall Attach: Candidate pose rejected because of penetration.");
@@ -1066,9 +1062,11 @@ public class PropTransformSystem : MonoBehaviour
             _firstPersonController.SetControlLocked(false);
         }
 
-        if (_characterController != null && _characterController.enabled)
+        if (_characterController != null &&
+            _characterController.enabled &&
+            _firstPersonController != null)
         {
-            _characterController.Move(detachNormal * 0.08f);
+            _firstPersonController.MoveCharacterBy(detachNormal * 0.08f);
         }
 
         if (applyJumpImpulse && _firstPersonController != null)
@@ -1134,7 +1132,7 @@ public class PropTransformSystem : MonoBehaviour
 
             _wallUserRotationDegrees = candidateUserRotation;
             _wallDistance = safeDistance;
-            _characterController.Move(safePosition - transform.position);
+            _firstPersonController.MoveCharacterBy(safePosition - transform.position);
             propVisualRoot.rotation = candidateRotation;
             Physics.SyncTransforms();
         }
@@ -1232,7 +1230,7 @@ public class PropTransformSystem : MonoBehaviour
                         out Vector3 safePosition,
                         out float safeDistance))
                 {
-                    _characterController.Move(safePosition - transform.position);
+                    _firstPersonController.MoveCharacterBy(safePosition - transform.position);
                     AttachedWallCollider = desiredWallHit.collider;
                     WallNormal = candidateNormal;
                     _wallHitPoint = desiredWallHit.point;
@@ -1406,7 +1404,7 @@ public class PropTransformSystem : MonoBehaviour
                 correction = correction.normalized * maximumCorrection;
             }
 
-            _characterController.Move(correction);
+            _firstPersonController.MoveCharacterBy(correction);
             AttachedWallCollider = wallHit.collider;
             WallNormal = candidateNormal;
             _wallHitPoint = wallHit.point;
@@ -2573,45 +2571,6 @@ public class PropTransformSystem : MonoBehaviour
 
             behaviour.enabled = false;
             Destroy(behaviour);
-        }
-    }
-
-    private static void AddBlockingColliderToPropVisual(GameObject clone)
-    {
-        if (clone == null)
-        {
-            return;
-        }
-
-        Renderer[] renderers = clone.GetComponentsInChildren<Renderer>(true);
-        if (renderers.Length == 0)
-        {
-            return;
-        }
-
-        Bounds worldBounds = CalculateRendererBounds(renderers);
-        BoxCollider collider = clone.AddComponent<BoxCollider>();
-        Vector3 localCenter = clone.transform.InverseTransformPoint(worldBounds.center);
-        Vector3 localSize = clone.transform.InverseTransformVector(worldBounds.size);
-        collider.center = localCenter;
-        collider.size = new Vector3(
-            Mathf.Max(0.35f, Mathf.Abs(localSize.x)),
-            Mathf.Max(0.35f, Mathf.Abs(localSize.y)),
-            Mathf.Max(0.35f, Mathf.Abs(localSize.z))
-        );
-        collider.isTrigger = false;
-
-        NavMeshObstacle obstacle = clone.AddComponent<NavMeshObstacle>();
-        obstacle.shape = NavMeshObstacleShape.Box;
-        obstacle.center = collider.center;
-        obstacle.size = collider.size;
-        obstacle.carving = true;
-        obstacle.carveOnlyStationary = false;
-
-        CharacterController ownerController = clone.GetComponentInParent<CharacterController>();
-        if (ownerController != null)
-        {
-            Physics.IgnoreCollision(collider, ownerController, true);
         }
     }
 

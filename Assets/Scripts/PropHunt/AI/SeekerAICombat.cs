@@ -11,13 +11,18 @@ public sealed class SeekerAICombat : MonoBehaviour
     [SerializeField, Min(0.35f)] private float maximumShotInterval = 0.55f;
     [SerializeField, Range(1f, 45f)] private float bodyAimTolerance = 9f;
     [SerializeField, Range(1f, 60f)] private float muzzleAimTolerance = 18f;
+    [SerializeField, Range(0f, 15f)] private float nearAimError = 2f;
+    [SerializeField, Range(0f, 15f)] private float farAimError = 3.5f;
 
     private float nextDecisionShotAt;
+    private SeekerTeamCoordinator teamCoordinator;
+    private SeekerAIController owner;
 
     public float MinimumShotInterval => minimumShotInterval;
     public float MaximumShotInterval => maximumShotInterval;
     public float BodyAimTolerance => bodyAimTolerance;
     public float MuzzleAimTolerance => muzzleAimTolerance;
+    public Vector2 AimErrorRange => new Vector2(nearAimError, farAimError);
 
     public void Configure(
         SeekerRaycastWeapon configuredWeapon,
@@ -29,6 +34,20 @@ public sealed class SeekerAICombat : MonoBehaviour
         energy = configuredEnergy;
         worldMuzzle = configuredWorldMuzzle;
         perception = configuredPerception;
+    }
+
+    public void ConfigureTeam(
+        SeekerTeamCoordinator configuredCoordinator,
+        SeekerAIController configuredOwner)
+    {
+        teamCoordinator = configuredCoordinator;
+        owner = configuredOwner;
+    }
+
+    public void ConfigureAimError(float nearError, float farError)
+    {
+        nearAimError = Mathf.Max(0f, nearError);
+        farAimError = Mathf.Max(nearAimError, farError);
     }
 
     public bool TryFireAtHider(HiderPerceptionSignature target)
@@ -89,13 +108,18 @@ public sealed class SeekerAICombat : MonoBehaviour
             return false;
         }
 
-        float error = distance <= 10f ? 2f : 3.5f;
+        bool hasPermit = teamCoordinator == null ||
+                         teamCoordinator.TryAcquireFirePermit(owner);
+        if (!hasPermit) return false;
+
+        float error = distance <= 10f ? nearAimError : farAimError;
         direction = Quaternion.Euler(
             Random.Range(-error, error),
             Random.Range(-error, error),
             0f) * direction.normalized;
 
         bool fired = weapon.TryFireFromAI(worldMuzzle.position, direction);
+        teamCoordinator?.CompleteFirePermit(owner, fired);
         if (fired)
         {
             nextDecisionShotAt = Time.time + Random.Range(minimumShotInterval, maximumShotInterval);

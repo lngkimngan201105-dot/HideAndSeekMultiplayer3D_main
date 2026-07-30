@@ -68,6 +68,13 @@ public sealed class SeekerAINavigation : MonoBehaviour
         ResetProgressTracking();
     }
 
+    public void ConfigureTuning(float configuredPatrolSpeed, float configuredChaseSpeed)
+    {
+        patrolSpeed = Mathf.Max(0f, configuredPatrolSpeed);
+        chaseSpeed = Mathf.Max(0f, configuredChaseSpeed);
+        ApplyAgentSettings();
+    }
+
     public void SetStopped(bool stopped)
     {
         if (!IsReady) return;
