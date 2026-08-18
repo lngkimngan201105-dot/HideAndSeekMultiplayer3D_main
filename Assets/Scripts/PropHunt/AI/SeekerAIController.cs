@@ -61,6 +61,9 @@ public sealed class SeekerAIController : MonoBehaviour
     private bool hasLastKnownPosition;
     private bool dormant;
     private float fireAllowedAt;
+    private float nextPropSurveyAt;
+    private int searchPointOrdinal;
+    private Vector3 lastObservedVelocity;
     private Renderer[] cachedRenderers;
     private bool[] cachedRendererStates;
     private Collider[] cachedColliders;
@@ -91,6 +94,7 @@ public sealed class SeekerAIController : MonoBehaviour
                                  CurrentState != SeekerAIState.Eliminated &&
                                  CurrentState != SeekerAIState.RoundEnded;
     public float FireAllowedAt => fireAllowedAt;
+    public Vector3 LastObservedVelocity => lastObservedVelocity;
 
     public Vector3 ResolvePresentationAimPoint()
     {
@@ -171,6 +175,14 @@ public sealed class SeekerAIController : MonoBehaviour
         }
 
         perception?.Observe();
+        if (Time.time >= nextPropSurveyAt &&
+            CurrentState != SeekerAIState.Chase &&
+            CurrentState != SeekerAIState.Attack &&
+            CurrentState != SeekerAIState.Reloading)
+        {
+            nextPropSurveyAt = Time.time + 0.45f;
+            suspicion?.SurveyVisibleProps(perception != null ? perception.Eye : null, perception);
+        }
         UpdateEvidence();
         if (CurrentState != SeekerAIState.Reloading &&
             visibleEvidenceTime >= reactionTime)
@@ -217,6 +229,10 @@ public sealed class SeekerAIController : MonoBehaviour
         teamCoordinator = configuredCoordinator;
         teamRole = configuredRole;
         combat?.ConfigureTeam(configuredCoordinator, this);
+        navigation?.ConfigureTactics(
+            FindObjectOfType<PropHuntShrinkingZone>(true),
+            configuredCoordinator,
+            this);
         if (!Application.isPlaying)
         {
             dormant = startsDormant;
@@ -295,6 +311,7 @@ public sealed class SeekerAIController : MonoBehaviour
     {
         if (!IsOperational || Time.time - snapshot.Timestamp > 2.5f) return;
         lastKnownPosition = snapshot.ApproximatePosition;
+        lastObservedVelocity = Vector3.ClampMagnitude(snapshot.ObservedVelocity, 8f);
         lastKnownUpdatedAt = snapshot.Timestamp;
         hasLastKnownPosition = true;
         investigationSnapshot = flankDestination;
@@ -475,7 +492,7 @@ public sealed class SeekerAIController : MonoBehaviour
             else
             {
                 navigation?.MoveTo(
-                    perception.Hider.transform.position,
+                    ResolvePursuitDestination(),
                     true);
             }
         }
@@ -653,6 +670,7 @@ public sealed class SeekerAIController : MonoBehaviour
     {
         if (perception == null || !perception.CanIdentifyHider) return;
         lastKnownPosition = perception.LastVisiblePosition;
+        lastObservedVelocity = perception.EstimatedVisibleVelocity;
         searchOrigin = lastKnownPosition;
         hasLastKnownPosition = true;
         lastKnownUpdatedAt = Time.time;
@@ -673,7 +691,15 @@ public sealed class SeekerAIController : MonoBehaviour
     {
         perception?.ForgetPriorSight();
         visibleEvidenceTime = 0f;
-        if (hasLastKnownPosition) searchOrigin = lastKnownPosition;
+        if (hasLastKnownPosition)
+        {
+            Vector3 projected = lastKnownPosition +
+                                lastObservedVelocity * 1.15f;
+            searchOrigin = navigation != null &&
+                           navigation.TrySampleReachable(projected, 4f, out Vector3 sampled)
+                ? sampled
+                : lastKnownPosition;
+        }
         ChangeState(SeekerAIState.SearchLastKnown);
     }
 
@@ -700,13 +726,54 @@ public sealed class SeekerAIController : MonoBehaviour
 
     private void MoveToNextSearchPoint()
     {
-        if (navigation == null ||
-            navigation.MoveToRandomPointNear(searchOrigin, 4f, 7f))
+        if (navigation == null) return;
+        Vector3 direction = lastObservedVelocity.sqrMagnitude > 0.1f
+            ? lastObservedVelocity.normalized
+            : (searchOrigin - transform.position).normalized;
+        if (teamRole == SeekerTeamRole.SupportFlanker)
+            direction = Quaternion.Euler(0f, 55f, 0f) * direction;
+
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            return;
+            if (!navigation.MoveToDirectedSearchPoint(
+                    searchOrigin,
+                    direction,
+                    searchPointOrdinal++,
+                    4f,
+                    9f))
+            {
+                continue;
+            }
+
+            if (teamCoordinator == null ||
+                teamCoordinator.TryClaimSearchArea(
+                    this,
+                    navigation.IntendedDestination,
+                    5f))
+            {
+                return;
+            }
         }
 
         searchPointsRemaining--;
+    }
+
+    private Vector3 ResolvePursuitDestination()
+    {
+        if (perception == null) return transform.position;
+        float lead = Mathf.Lerp(
+            0.35f,
+            1.2f,
+            Mathf.InverseLerp(6f, 24f, perception.DistanceToHider));
+        Vector3 predicted = perception.PredictVisiblePosition(lead);
+        Vector3 velocity = perception.EstimatedVisibleVelocity;
+        if (teamRole == SeekerTeamRole.SupportFlanker &&
+            velocity.sqrMagnitude > 0.25f)
+        {
+            Vector3 lateral = Vector3.Cross(Vector3.up, velocity.normalized);
+            predicted += lateral * 5f;
+        }
+        return predicted;
     }
 
     private void TickNavigationRecovery()
@@ -726,7 +793,7 @@ public sealed class SeekerAIController : MonoBehaviour
                 break;
             case SeekerAIState.Chase:
                 if (perception != null && perception.CanIdentifyHider)
-                    navigation.MoveTo(perception.Hider.transform.position, true);
+                    navigation.MoveTo(ResolvePursuitDestination(), true);
                 else
                     BeginLastKnownSearch();
                 break;
@@ -889,6 +956,7 @@ public sealed class SeekerAIController : MonoBehaviour
                 suspicion?.BuildSearch(searchOrigin);
                 suspicionTarget = null;
                 searchPointsRemaining = Random.Range(3, 6);
+                searchPointOrdinal = teamRole == SeekerTeamRole.SupportFlanker ? 2 : 0;
                 searchPointReachedAt = 0f;
                 MoveToNextSearchPoint();
                 break;
@@ -935,6 +1003,10 @@ public sealed class SeekerAIController : MonoBehaviour
         if (teamCoordinator == null)
             teamCoordinator = FindObjectOfType<SeekerTeamCoordinator>(true);
         combat?.ConfigureTeam(teamCoordinator, this);
+        navigation?.ConfigureTactics(
+            FindObjectOfType<PropHuntShrinkingZone>(true),
+            teamCoordinator,
+            this);
     }
 
     private void Subscribe()

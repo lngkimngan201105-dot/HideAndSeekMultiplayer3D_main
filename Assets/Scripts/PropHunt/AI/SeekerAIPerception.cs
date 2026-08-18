@@ -11,11 +11,15 @@ public sealed class SeekerAIPerception : MonoBehaviour
     [SerializeField] private LayerMask sightMask = Physics.DefaultRaycastLayers;
 
     private bool hasValidPriorSight;
+    private bool hasMotionSample;
+    private Vector3 previousVisiblePosition;
+    private float previousVisibleAt;
 
     public bool HasLineOfSight { get; private set; }
     public bool CanIdentifyHider { get; private set; }
     public float DistanceToHider { get; private set; } = float.PositiveInfinity;
     public Vector3 LastVisiblePosition { get; private set; }
+    public Vector3 EstimatedVisibleVelocity { get; private set; }
     public HiderPerceptionSignature Hider => hider;
     public float ViewDistance => viewDistance;
     public float FieldOfView => fieldOfView;
@@ -26,6 +30,8 @@ public sealed class SeekerAIPerception : MonoBehaviour
         eye = configuredEye;
         hider = configuredHider;
         hasValidPriorSight = false;
+        hasMotionSample = false;
+        EstimatedVisibleVelocity = Vector3.zero;
     }
 
     public void ConfigureTuning(float configuredViewDistance, float configuredFieldOfView)
@@ -76,7 +82,14 @@ public sealed class SeekerAIPerception : MonoBehaviour
         if (CanIdentifyHider)
         {
             LastVisiblePosition = hider.transform.position;
+            UpdateVisibleMotion(LastVisiblePosition);
         }
+    }
+
+    public Vector3 PredictVisiblePosition(float leadSeconds)
+    {
+        return LastVisiblePosition +
+               EstimatedVisibleVelocity * Mathf.Clamp(leadSeconds, 0f, 2f);
     }
 
     public bool HasUnblockedLine(Vector3 origin, Vector3 target, Transform acceptedTarget)
@@ -124,5 +137,27 @@ public sealed class SeekerAIPerception : MonoBehaviour
     {
         hasValidPriorSight = false;
         CanIdentifyHider = false;
+    }
+
+    private void UpdateVisibleMotion(Vector3 visiblePosition)
+    {
+        if (hasMotionSample)
+        {
+            float elapsed = Time.time - previousVisibleAt;
+            if (elapsed > 0.03f)
+            {
+                Vector3 measured = (visiblePosition - previousVisiblePosition) / elapsed;
+                measured.y = 0f;
+                measured = Vector3.ClampMagnitude(measured, 8f);
+                EstimatedVisibleVelocity = Vector3.Lerp(
+                    EstimatedVisibleVelocity,
+                    measured,
+                    0.35f);
+            }
+        }
+
+        previousVisiblePosition = visiblePosition;
+        previousVisibleAt = Time.time;
+        hasMotionSample = true;
     }
 }

@@ -23,6 +23,7 @@ public sealed class SeekerAISuspicionSystem : MonoBehaviour
     {
         public Vector3 Position;
         public Quaternion Rotation;
+        public Vector3 Scale;
         public float Score;
         public float UpdatedAt;
     }
@@ -50,6 +51,46 @@ public sealed class SeekerAISuspicionSystem : MonoBehaviour
     public void BuildSearch(Vector3 lastKnownPosition)
     {
         BuildCandidates(lastKnownPosition, investigationRadius, false);
+    }
+
+    public void SurveyVisibleProps(
+        Transform eye,
+        SeekerAIPerception perception)
+    {
+        if (perception == null) return;
+        Vector3 origin = eye != null
+            ? eye.position
+            : transform.position + Vector3.up * 1.55f;
+        Vector3 forward = eye != null ? eye.forward : transform.forward;
+        HashSet<int> seen = new HashSet<int>();
+
+        foreach (Collider candidate in Physics.OverlapSphere(
+                     origin,
+                     perception.ViewDistance,
+                     Physics.DefaultRaycastLayers,
+                     QueryTriggerInteraction.Collide))
+        {
+            PropTarget prop = candidate != null
+                ? candidate.GetComponentInParent<PropTarget>()
+                : null;
+            if (prop == null ||
+                candidate.GetComponentInParent<HiderHealth>() != null ||
+                !SeekerShotTargetClassifier.IsGenuinelyCopyable(prop) ||
+                !seen.Add(prop.GetInstanceID()))
+            {
+                continue;
+            }
+
+            Vector3 target = candidate.bounds.center;
+            Vector3 delta = target - origin;
+            if (Vector3.Angle(forward, delta) > perception.FieldOfView * 0.5f ||
+                !perception.HasUnblockedLine(origin, target, prop.transform))
+            {
+                continue;
+            }
+
+            RememberObservedProp(prop.transform);
+        }
     }
 
     public bool TryFindVisibleHighSuspicion(
@@ -218,6 +259,11 @@ public sealed class SeekerAISuspicionSystem : MonoBehaviour
                 score += 25f;
                 reason += ", changed orientation";
             }
+            if ((previous.Scale - identity.lossyScale).sqrMagnitude > 0.01f)
+            {
+                score += 20f;
+                reason += ", changed size";
+            }
         }
 
         score += Mathf.Clamp((investigationRadius - distance) * 2f, 0f, 12f);
@@ -232,11 +278,38 @@ public sealed class SeekerAISuspicionSystem : MonoBehaviour
         {
             Position = identity.position,
             Rotation = identity.rotation,
+            Scale = identity.lossyScale,
             Score = Mathf.Min(score, 100f),
             UpdatedAt = Time.time
         };
         scored = new SuspicionCandidate(candidate, score, reason);
         return true;
+    }
+
+    private void RememberObservedProp(Transform identity)
+    {
+        int id = identity.GetInstanceID();
+        float retainedScore = 0f;
+        if (propMemory.TryGetValue(id, out PropMemory previous))
+        {
+            float age = Mathf.Max(0f, Time.time - previous.UpdatedAt);
+            retainedScore = Mathf.Max(0f, previous.Score - age * scoreDecayPerSecond);
+            if (Vector3.Distance(previous.Position, identity.position) > 0.12f)
+                retainedScore += 60f;
+            if (Quaternion.Angle(previous.Rotation, identity.rotation) > 12f)
+                retainedScore += 25f;
+            if ((previous.Scale - identity.lossyScale).sqrMagnitude > 0.01f)
+                retainedScore += 20f;
+        }
+
+        propMemory[id] = new PropMemory
+        {
+            Position = identity.position,
+            Rotation = identity.rotation,
+            Scale = identity.lossyScale,
+            Score = Mathf.Min(retainedScore, 100f),
+            UpdatedAt = Time.time
+        };
     }
 
     private static int GetCandidateIdentity(Collider candidate)

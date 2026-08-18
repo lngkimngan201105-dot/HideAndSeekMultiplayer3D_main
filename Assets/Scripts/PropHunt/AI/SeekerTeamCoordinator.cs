@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 public enum SeekerTeamRole
@@ -14,6 +15,7 @@ public struct SeekerTeamSightingSnapshot
     public float Timestamp;
     [Range(0f, 1f)] public float Confidence;
     public float UncertaintyRadius;
+    public Vector3 ObservedVelocity;
     public SeekerTeamRole SourceRole;
 }
 
@@ -45,6 +47,10 @@ public sealed class SeekerTeamCoordinator : MonoBehaviour
     private float lastBroadcastAt = float.NegativeInfinity;
     private float nextSpacingCheckAt;
     private bool secondaryActivated;
+    private readonly Dictionary<SeekerAIController, int> patrolClaims =
+        new Dictionary<SeekerAIController, int>();
+    private readonly Dictionary<SeekerAIController, Vector3> searchClaims =
+        new Dictionary<SeekerAIController, Vector3>();
 
     public int AliveSeekerCount
     {
@@ -164,6 +170,45 @@ public sealed class SeekerTeamCoordinator : MonoBehaviour
         permitOwner = null;
     }
 
+    public void ClaimPatrolRegion(SeekerAIController requester, int regionIndex)
+    {
+        if (requester != null) patrolClaims[requester] = regionIndex;
+    }
+
+    public bool IsPatrolRegionClaimedByOther(
+        SeekerAIController requester,
+        int regionIndex)
+    {
+        foreach (KeyValuePair<SeekerAIController, int> claim in patrolClaims)
+        {
+            if (claim.Key != null && claim.Key != requester &&
+                claim.Key.IsOperational && claim.Value == regionIndex)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool TryClaimSearchArea(
+        SeekerAIController requester,
+        Vector3 position,
+        float separation)
+    {
+        float minimumSqr = separation * separation;
+        foreach (KeyValuePair<SeekerAIController, Vector3> claim in searchClaims)
+        {
+            if (claim.Key != null && claim.Key != requester &&
+                claim.Key.IsOperational &&
+                (claim.Value - position).sqrMagnitude < minimumSqr)
+            {
+                return false;
+            }
+        }
+        if (requester != null) searchClaims[requester] = position;
+        return true;
+    }
+
     public void ReportSighting(SeekerAIController source, Vector3 exactPosition)
     {
         if (source == null || Time.time - lastBroadcastAt < sightingBroadcastInterval)
@@ -182,10 +227,12 @@ public sealed class SeekerTeamCoordinator : MonoBehaviour
         SeekerTeamSightingSnapshot snapshot = new SeekerTeamSightingSnapshot
         {
             ApproximatePosition = exactPosition +
+                                  source.LastObservedVelocity * 0.8f +
                                   new Vector3(noise.x, 0f, noise.y),
             Timestamp = Time.time,
             Confidence = 0.78f,
             UncertaintyRadius = noise.magnitude,
+            ObservedVelocity = source.LastObservedVelocity,
             SourceRole = source.TeamRole
         };
 
@@ -300,6 +347,13 @@ public sealed class SeekerTeamCoordinator : MonoBehaviour
         Vector3 snapshot,
         Vector3 sourcePosition)
     {
+        if (receiver.TeamRole == SeekerTeamRole.PrimaryPursuer)
+        {
+            return receiver.TrySampleReachable(snapshot, 4f, out Vector3 pursuit)
+                ? pursuit
+                : snapshot;
+        }
+
         Vector3 sourceDirection = sourcePosition - snapshot;
         sourceDirection.y = 0f;
         if (sourceDirection.sqrMagnitude < 0.01f) sourceDirection = Vector3.forward;
@@ -328,6 +382,11 @@ public sealed class SeekerTeamCoordinator : MonoBehaviour
 
     private void ApplyRoundState(PropHuntRoundState state)
     {
+        if (state != PropHuntRoundState.Hunting)
+        {
+            patrolClaims.Clear();
+            searchClaims.Clear();
+        }
         if (state == PropHuntRoundState.Preparation)
         {
             secondaryActivated = false;

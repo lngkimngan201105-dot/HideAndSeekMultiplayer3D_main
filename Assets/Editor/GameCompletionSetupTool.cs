@@ -28,7 +28,7 @@ public static class GameCompletionSetupTool
     public const string LoseArtPath =
         "Assets/UI/FinalArt/HiderLose_Final.png";
     public const string WinCleanArtPath =
-        "Assets/UI/FinalArt/HiderWin_Clean.png";
+        "Assets/UI/FinalArt/HiderWin_Provided.png";
     public const string LoseCleanArtPath =
         "Assets/UI/FinalArt/HiderLose_Clean.png";
     private static readonly Color Cyan = new Color32(29, 224, 226, 255);
@@ -82,6 +82,37 @@ public static class GameCompletionSetupTool
         Debug.Log(
             "[Setup Final UI] Saved Assets/Scenes/MainMenu.unity and " +
             "Assets/Scenes/Map_v2.unity with persistent callbacks.");
+    }
+
+    [MenuItem("Tools/Prop Hunt/Result UI/Setup Hider Victory UI")]
+    public static void SetupHiderVictoryUIOnly()
+    {
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+            throw new InvalidOperationException(
+                "Exit Play Mode before setting up the Hider victory UI.");
+
+        PrepareFinalArtAssets();
+        Scene gameplay = EditorSceneManager.OpenScene(
+            GameplayScenePath, OpenSceneMode.Single);
+        PropHuntRoundManager round =
+            Object.FindObjectOfType<PropHuntRoundManager>(true);
+        SeekerTeamCoordinator team =
+            Object.FindObjectOfType<SeekerTeamCoordinator>(true);
+        PropTransformSystem hider =
+            Object.FindObjectsOfType<PropTransformSystem>(true)
+                .FirstOrDefault(item => item.playerRole == PlayerRole.Hider);
+        if (round == null || team == null || hider == null)
+            throw new InvalidOperationException(
+                "Map_v2 is missing RoundManager, SeekerTeamCoordinator or Hider.");
+
+        BuildRoundResultUI(gameplay, round, team, hider);
+        EditorSceneManager.MarkSceneDirty(gameplay);
+        EditorSceneManager.SaveScene(gameplay, GameplayScenePath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        Debug.Log(
+            "[Setup Hider Victory UI] Saved the supplied bitmap and static " +
+            "Replay/Menu hitboxes in Assets/Scenes/Map_v2.unity.");
     }
 
     [MenuItem("Tools/Prop Hunt/Open Main Menu")]
@@ -343,24 +374,29 @@ public static class GameCompletionSetupTool
 
         Sprite winSprite = LoadFinalSprite(WinCleanArtPath);
         Sprite loseSprite = LoadFinalSprite(LoseCleanArtPath);
-        EnsureFullScreenArt(win.transform, "WinFinalArt", winSprite);
-        DisableCleanupOverlay(
+
+        // The supplied Hider-victory bitmap is the complete result screen.
+        // Keep its art and hitboxes inside the same aspect-fitted container so
+        // every click region follows the painted buttons at any resolution.
+        ClearChildren(win.transform);
+        GameObject winContent = EnsureAspectFittedContent(
             win.transform,
-            "WinTopCleanup",
-            new Vector2(0.296f, 0.905f),
-            new Vector2(0.704f, 0.988f));
+            "HiderVictoryScreen",
+            winSprite.rect.width / winSprite.rect.height);
+        EnsureStaticFullScreenArt(
+            winContent.transform,
+            "VictoryBackgroundImage",
+            winSprite);
         Button replay = EnsureTransparentButton(
-            win.transform,
-            "WinReplayButton",
-            new Vector2(0.280f, 0.145f),
-            new Vector2(0.495f, 0.255f));
+            winContent.transform,
+            "ReplayButton_Hitbox",
+            new Vector2(0.269f, 0.164f),
+            new Vector2(0.493f, 0.277f));
         Button menu = EnsureTransparentButton(
-            win.transform,
-            "WinMainMenuButton",
-            new Vector2(0.525f, 0.145f),
-            new Vector2(0.745f, 0.255f));
-        ConfigureEmbeddedHover(replay, Cyan);
-        ConfigureEmbeddedHover(menu, Gold);
+            winContent.transform,
+            "MenuButton_Hitbox",
+            new Vector2(0.520f, 0.164f),
+            new Vector2(0.748f, 0.277f));
 
         EnsureFullScreenArt(lose.transform, "LoseFinalArt", loseSprite);
         DisableCleanupOverlay(
@@ -849,6 +885,39 @@ public static class GameCompletionSetupTool
         fitter.aspectRatio = sprite.rect.width / sprite.rect.height;
         EditorUtility.SetDirty(image);
         EditorUtility.SetDirty(fitter);
+        return image;
+    }
+
+    private static GameObject EnsureAspectFittedContent(
+        Transform parent,
+        string name,
+        float aspectRatio)
+    {
+        GameObject root = EnsureChild(parent, name);
+        RectTransform rect = RequireRect(root);
+        Stretch(rect);
+        AspectRatioFitter fitter = GetOrAddUnique<AspectRatioFitter>(root);
+        fitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
+        fitter.aspectRatio = aspectRatio;
+        EditorUtility.SetDirty(fitter);
+        return root;
+    }
+
+    private static Image EnsureStaticFullScreenArt(
+        Transform parent,
+        string name,
+        Sprite sprite)
+    {
+        GameObject root = EnsureChild(parent, name);
+        RectTransform rect = RequireRect(root);
+        Stretch(rect);
+        Image image = GetOrAddUnique<Image>(root);
+        image.sprite = sprite;
+        image.type = Image.Type.Simple;
+        image.preserveAspect = true;
+        image.color = Color.white;
+        image.raycastTarget = false;
+        EditorUtility.SetDirty(image);
         return image;
     }
 

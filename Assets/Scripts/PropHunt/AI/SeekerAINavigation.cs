@@ -13,6 +13,10 @@ public sealed class SeekerAINavigation : MonoBehaviour
     [SerializeField, Min(0.1f)] private float fallbackPatrolRadius = 18f;
     [SerializeField, Min(0.5f)] private float stuckTimeout = 1.75f;
 
+    private PropHuntShrinkingZone shrinkingZone;
+    private SeekerTeamCoordinator teamCoordinator;
+    private SeekerAIController owner;
+
     private readonly List<int> recentPatrolIndices = new List<int>(3);
     private readonly Dictionary<int, float> lastPatrolVisitAt =
         new Dictionary<int, float>();
@@ -75,6 +79,16 @@ public sealed class SeekerAINavigation : MonoBehaviour
         ApplyAgentSettings();
     }
 
+    public void ConfigureTactics(
+        PropHuntShrinkingZone configuredZone,
+        SeekerTeamCoordinator configuredCoordinator,
+        SeekerAIController configuredOwner)
+    {
+        shrinkingZone = configuredZone;
+        teamCoordinator = configuredCoordinator;
+        owner = configuredOwner;
+    }
+
     public void SetStopped(bool stopped)
     {
         if (!IsReady) return;
@@ -134,7 +148,9 @@ public sealed class SeekerAINavigation : MonoBehaviour
             float distance = Random.Range(minimumRadius, maximumRadius);
             Vector3 candidate = center +
                                 new Vector3(direction.x, 0f, direction.y) * distance;
-            if (TryResolveCompletePath(candidate, 2f, out Vector3 sampled) &&
+            if (IsTacticalPointAllowed(candidate) &&
+                TryResolveCompletePath(candidate, 2f, out Vector3 sampled) &&
+                IsTacticalPointAllowed(sampled) &&
                 MoveTo(sampled, false))
             {
                 return true;
@@ -142,6 +158,43 @@ public sealed class SeekerAINavigation : MonoBehaviour
         }
 
         return false;
+    }
+
+    public bool MoveToDirectedSearchPoint(
+        Vector3 center,
+        Vector3 preferredDirection,
+        int searchOrdinal,
+        float minimumRadius,
+        float maximumRadius)
+    {
+        preferredDirection.y = 0f;
+        if (preferredDirection.sqrMagnitude < 0.01f)
+            preferredDirection = transform.forward;
+        preferredDirection.Normalize();
+
+        float[] fanAngles = { 0f, 32f, -32f, 68f, -68f, 110f, -110f, 180f };
+        int start = Mathf.Abs(searchOrdinal) % fanAngles.Length;
+        for (int attempt = 0; attempt < fanAngles.Length; attempt++)
+        {
+            int index = (start + attempt) % fanAngles.Length;
+            Vector3 direction = Quaternion.Euler(0f, fanAngles[index], 0f) *
+                                preferredDirection;
+            float t = fanAngles.Length <= 1
+                ? 0f
+                : (float)attempt / (fanAngles.Length - 1);
+            float distance = Mathf.Lerp(maximumRadius, minimumRadius, t);
+            Vector3 candidate = center + direction * distance;
+            if (!IsTacticalPointAllowed(candidate) ||
+                !TryResolveCompletePath(candidate, 3f, out Vector3 sampled) ||
+                !IsTacticalPointAllowed(sampled))
+            {
+                continue;
+            }
+
+            return MoveTo(sampled, false);
+        }
+
+        return MoveToRandomPointNear(center, minimumRadius, maximumRadius);
     }
 
     public bool TryMoveAwayFrom(Vector3 threat, float desiredDistance)
@@ -284,6 +337,13 @@ public sealed class SeekerAINavigation : MonoBehaviour
                 continue;
             }
 
+            if (!IsTacticalPointAllowed(sampled) ||
+                (teamCoordinator != null &&
+                 teamCoordinator.IsPatrolRegionClaimedByOther(owner, i)))
+            {
+                continue;
+            }
+
             float age = lastPatrolVisitAt.TryGetValue(i, out float visitedAt)
                 ? Mathf.Max(0f, Time.time - visitedAt)
                 : 120f;
@@ -293,7 +353,8 @@ public sealed class SeekerAINavigation : MonoBehaviour
                 Vector3.Distance(transform.position, sampled) / 18f,
                 0.35f,
                 1.5f);
-            float weight = (unvisitedWeight + propWeight) * distanceWeight;
+            float zoneWeight = GetZonePriority(sampled);
+            float weight = (unvisitedWeight + propWeight) * distanceWeight * zoneWeight;
             indices.Add(i);
             positions.Add(sampled);
             weights.Add(weight);
@@ -307,7 +368,10 @@ public sealed class SeekerAINavigation : MonoBehaviour
             {
                 Transform region = patrolRegions[i];
                 if (region == null || i == CurrentPatrolIndex ||
-                    !TryResolveCompletePath(region.position, 5f, out Vector3 sampled))
+                    !TryResolveCompletePath(region.position, 5f, out Vector3 sampled) ||
+                    !IsTacticalPointAllowed(sampled) ||
+                    (teamCoordinator != null &&
+                     teamCoordinator.IsPatrolRegionClaimedByOther(owner, i)))
                 {
                     continue;
                 }
@@ -339,6 +403,7 @@ public sealed class SeekerAINavigation : MonoBehaviour
         CurrentPatrolIndex = index;
         PatrolSelectionCount++;
         lastPatrolVisitAt[index] = Time.time;
+        teamCoordinator?.ClaimPatrolRegion(owner, index);
         recentPatrolIndices.Add(index);
         while (recentPatrolIndices.Count > Mathf.Min(3, patrolRegions.Length - 1))
         {
@@ -354,6 +419,7 @@ public sealed class SeekerAINavigation : MonoBehaviour
             Vector3 candidate = transform.position +
                                 new Vector3(circle.x, 0f, circle.y);
             if (Vector3.SqrMagnitude(candidate - transform.position) < 16f ||
+                !IsTacticalPointAllowed(candidate) ||
                 !TryResolveCompletePath(
                     candidate,
                     fallbackPatrolRadius,
@@ -368,6 +434,26 @@ public sealed class SeekerAINavigation : MonoBehaviour
         }
 
         return false;
+    }
+
+    private bool IsTacticalPointAllowed(Vector3 point)
+    {
+        return shrinkingZone == null || !shrinkingZone.IsZoneActive ||
+               shrinkingZone.IsPositionInsideZone(point, -1f);
+    }
+
+    private float GetZonePriority(Vector3 point)
+    {
+        if (shrinkingZone == null || !shrinkingZone.IsZoneActive ||
+            shrinkingZone.CurrentRadius <= 0.1f)
+        {
+            return 1f;
+        }
+
+        float normalized = Mathf.Clamp01(
+            shrinkingZone.DistanceFromCenterXZ(point) /
+            shrinkingZone.CurrentRadius);
+        return Mathf.Lerp(1.8f, 1f, normalized);
     }
 
     private bool TryResolveCompletePath(

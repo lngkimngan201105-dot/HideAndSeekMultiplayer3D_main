@@ -20,6 +20,7 @@ public static class GameCompletionValidationTool
     private const string StaticFinalArtKey =
         "PropHunt.GameCompletionValidation.StaticFinalArtPassed";
     private const string ReportPath = "GameCompletionValidation.log";
+    private const string RequestPath = "GameCompletionValidation.run";
     private static readonly List<string> Failures = new List<string>();
     private static readonly List<string> Notes = new List<string>();
     private static double phaseStartedAt;
@@ -33,6 +34,8 @@ public static class GameCompletionValidationTool
 
     static GameCompletionValidationTool()
     {
+        EditorApplication.update -= TryRunRequestedValidation;
+        EditorApplication.update += TryRunRequestedValidation;
         EditorApplication.playModeStateChanged -= HandlePlayModeChanged;
         EditorApplication.playModeStateChanged += HandlePlayModeChanged;
         if (SessionState.GetBool(RunningKey, false) && EditorApplication.isPlaying)
@@ -40,6 +43,24 @@ public static class GameCompletionValidationTool
             EditorApplication.update -= TickPlaySmoke;
             EditorApplication.update += TickPlaySmoke;
         }
+    }
+
+    private static void TryRunRequestedValidation()
+    {
+        if (Application.isPlaying || EditorApplication.isCompiling ||
+            EditorApplication.isUpdating ||
+            SessionState.GetBool(RunningKey, false))
+        {
+            return;
+        }
+
+        string request = Path.Combine(
+            Directory.GetCurrentDirectory(), RequestPath);
+        if (!File.Exists(request)) return;
+
+        File.Delete(request);
+        EditorApplication.update -= TryRunRequestedValidation;
+        RunAll();
     }
 
     [MenuItem("Tools/Prop Hunt/Validate Completed Game")]
@@ -151,10 +172,12 @@ public static class GameCompletionValidationTool
         Require(Object.FindObjectsOfType<EventSystem>(true).Length == 1,
             "Map_v2 must contain exactly one EventSystem.");
         RequireHierarchy(gameplay, "RoundResultCanvas/BackgroundDim");
-        RequireHierarchy(gameplay, "RoundResultCanvas/WinFinalRoot/WinFinalArt");
-        RequireHierarchy(gameplay, "RoundResultCanvas/WinFinalRoot/WinTopCleanup");
-        RequireHierarchy(gameplay, "RoundResultCanvas/WinFinalRoot/WinReplayButton");
-        RequireHierarchy(gameplay, "RoundResultCanvas/WinFinalRoot/WinMainMenuButton");
+        RequireHierarchy(gameplay,
+            "RoundResultCanvas/WinFinalRoot/HiderVictoryScreen/VictoryBackgroundImage");
+        RequireHierarchy(gameplay,
+            "RoundResultCanvas/WinFinalRoot/HiderVictoryScreen/ReplayButton_Hitbox");
+        RequireHierarchy(gameplay,
+            "RoundResultCanvas/WinFinalRoot/HiderVictoryScreen/MenuButton_Hitbox");
         RequireHierarchy(gameplay, "RoundResultCanvas/LoseFinalRoot/LoseFinalArt");
         RequireHierarchy(gameplay, "RoundResultCanvas/LoseFinalRoot/LoseTopCleanup");
         RequireHierarchy(gameplay, "RoundResultCanvas/LoseFinalRoot/LoseReplayButton");
@@ -164,36 +187,33 @@ public static class GameCompletionValidationTool
             "Prototype WinPanel/LosePanel still exist in Map_v2.");
         ValidateFinalArt(
             gameplay,
-            "WinFinalArt",
-            GameCompletionSetupTool.WinCleanArtPath);
+            "VictoryBackgroundImage",
+            GameCompletionSetupTool.WinCleanArtPath,
+            false);
         ValidateFinalArt(
             gameplay,
             "LoseFinalArt",
-            GameCompletionSetupTool.LoseCleanArtPath);
-        RequireTransparentButton(gameplay, "WinReplayButton");
-        RequireTransparentButton(gameplay, "WinMainMenuButton");
+            GameCompletionSetupTool.LoseCleanArtPath,
+            true);
+        RequireTransparentButton(gameplay, "ReplayButton_Hitbox", false);
+        RequireTransparentButton(gameplay, "MenuButton_Hitbox", false);
         RequireTransparentButton(gameplay, "LoseReplayButton");
         RequireTransparentButton(gameplay, "LoseMainMenuButton");
         RequireNoHitboxOverlap(
             gameplay,
-            "WinReplayButton",
-            "WinMainMenuButton");
+            "ReplayButton_Hitbox",
+            "MenuButton_Hitbox");
         RequireNoHitboxOverlap(
             gameplay,
             "LoseReplayButton",
             "LoseMainMenuButton");
-        RequirePersistent(gameplay, "WinReplayButton", "Replay");
-        RequirePersistent(gameplay, "WinMainMenuButton", "ReturnToMainMenu");
+        RequirePersistent(gameplay, "ReplayButton_Hitbox", "Replay");
+        RequirePersistent(gameplay, "MenuButton_Hitbox", "ReturnToMainMenu");
         RequirePersistent(gameplay, "LoseReplayButton", "Replay");
         RequirePersistent(gameplay, "LoseMainMenuButton", "ReturnToMainMenu");
-        Require(FindNamed(gameplay, "WinTopCleanup") != null &&
-                !FindNamed(gameplay, "WinTopCleanup").activeSelf &&
-                FindNamed(gameplay, "LoseTopCleanup") != null &&
+        Require(FindNamed(gameplay, "LoseTopCleanup") != null &&
                 !FindNamed(gameplay, "LoseTopCleanup").activeSelf,
             "Clean result art should not require a visible rectangular cleanup overlay.");
-        ValidateNoWhitePatch(
-            GameCompletionSetupTool.WinCleanArtPath,
-            new Rect(0.28f, 0.82f, 0.44f, 0.18f));
         ValidateNoWhitePatch(
             GameCompletionSetupTool.LoseCleanArtPath,
             new Rect(0.28f, 0.78f, 0.44f, 0.20f));
@@ -215,6 +235,7 @@ public static class GameCompletionValidationTool
             gameplay,
             "RoundResultCanvas",
             new[] { "WinFinalRoot", "LoseFinalRoot" });
+        ValidateHiderVictoryAspectFit(gameplay);
 
         Scene menu = EditorSceneManager.OpenScene(
             GameCompletionSetupTool.MainMenuScenePath,
@@ -267,7 +288,8 @@ public static class GameCompletionValidationTool
         ValidateFinalArt(
             menu,
             "MainMenuFinalArt",
-            GameCompletionSetupTool.MainMenuArtPath);
+            GameCompletionSetupTool.MainMenuArtPath,
+            true);
         GameObject menuCanvas = FindNamed(menu, "MainMenuCanvas");
         Require(menuCanvas != null && menuCanvas.activeSelf,
             "MainMenuCanvas is not saved active.");
@@ -449,10 +471,12 @@ public static class GameCompletionValidationTool
             else if (phase == 5 &&
                      EditorApplication.timeSinceStartup - phaseStartedAt >= 0.25d)
             {
-                RoundResultController result =
-                    Object.FindObjectOfType<RoundResultController>(true);
-                Require(result != null, "Round result controller vanished before Replay.");
-                result?.Replay();
+                Button replay = FindNamed(
+                        SceneManager.GetActiveScene(), "ReplayButton_Hitbox")
+                    ?.GetComponent<Button>();
+                Require(replay != null,
+                    "Hider ReplayButton_Hitbox vanished before Replay.");
+                replay?.onClick.Invoke();
                 phase = 6;
                 phaseStartedAt = EditorApplication.timeSinceStartup;
             }
@@ -461,12 +485,14 @@ public static class GameCompletionValidationTool
             {
                 Require(SceneManager.GetActiveScene().name == "Map_v2",
                     "Replay did not reload Map_v2.");
-                RoundResultController reloaded =
-                    Object.FindObjectOfType<RoundResultController>(true);
-                Require(reloaded != null, "Reloaded Map_v2 has no result controller.");
+                Button menu = FindNamed(
+                        SceneManager.GetActiveScene(), "MenuButton_Hitbox")
+                    ?.GetComponent<Button>();
+                Require(menu != null,
+                    "Reloaded Map_v2 has no Hider MenuButton_Hitbox.");
                 Require(Time.timeScale == 1f,
                     "Replay leaked a paused time scale.");
-                reloaded?.ReturnToMainMenu();
+                menu?.onClick.Invoke();
                 phase = 7;
                 phaseStartedAt = EditorApplication.timeSinceStartup;
             }
@@ -594,7 +620,8 @@ public static class GameCompletionValidationTool
     private static void ValidateFinalArt(
         Scene scene,
         string objectName,
-        string spritePath)
+        string spritePath,
+        bool requireEnvelopeFitter)
     {
         GameObject owner = FindNamed(scene, objectName);
         Image image = owner != null ? owner.GetComponent<Image>() : null;
@@ -605,14 +632,27 @@ public static class GameCompletionValidationTool
             $"{objectName} does not use {spritePath}.");
         Require(image != null && image.preserveAspect && !image.raycastTarget,
             $"{objectName} must preserve aspect and ignore raycasts.");
-        Require(fitter != null &&
-                fitter.aspectMode == AspectRatioFitter.AspectMode.EnvelopeParent,
-            $"{objectName} must cover the Canvas with EnvelopeParent.");
+        if (requireEnvelopeFitter)
+        {
+            Require(fitter != null &&
+                    fitter.aspectMode == AspectRatioFitter.AspectMode.EnvelopeParent,
+                $"{objectName} must cover the Canvas with EnvelopeParent.");
+        }
+        else
+        {
+            AspectRatioFitter contentFitter = owner != null
+                ? owner.transform.parent?.GetComponent<AspectRatioFitter>()
+                : null;
+            Require(fitter == null && contentFitter != null &&
+                    contentFitter.aspectMode == AspectRatioFitter.AspectMode.FitInParent,
+                $"{objectName} and its hitboxes must share a FitInParent container.");
+        }
     }
 
     private static void RequireTransparentButton(
         Scene scene,
-        string buttonName)
+        string buttonName,
+        bool requireFeedback = true)
     {
         GameObject owner = FindNamed(scene, buttonName);
         Button button = owner != null ? owner.GetComponent<Button>() : null;
@@ -623,9 +663,13 @@ public static class GameCompletionValidationTool
             $"{buttonName} is not a real UGUI Button with an Image hitbox.");
         Require(image != null && image.color.a <= 0.01f && image.raycastTarget,
             $"{buttonName} hitbox must be transparent and raycastable.");
-        Require(feedback != null,
-            $"{buttonName} has no hover/pressed feedback component.");
-        if (feedback != null)
+        Require(requireFeedback ? feedback != null : feedback == null,
+            requireFeedback
+                ? $"{buttonName} has no hover/pressed feedback component."
+                : $"{buttonName} must not alter the supplied bitmap.");
+        Require(button == null || button.transition == Selectable.Transition.None,
+            $"{buttonName} must use Transition.None.");
+        if (requireFeedback && feedback != null)
         {
             SerializedObject serialized = new SerializedObject(feedback);
             SerializedProperty hoverColor =
@@ -760,8 +804,8 @@ public static class GameCompletionValidationTool
         Vector2[] resolutions =
         {
             new Vector2(1920f, 1080f),
-            new Vector2(1920f, 1200f),
-            new Vector2(2560f, 1080f)
+            new Vector2(1600f, 900f),
+            new Vector2(1366f, 768f)
         };
         foreach (string panelName in panelNames)
         {
@@ -779,6 +823,44 @@ public static class GameCompletionValidationTool
                         panel.sizeDelta.y * scale <= resolution.y,
                     $"{panelName} overflows at {resolution.x}x{resolution.y}.");
             }
+        }
+    }
+
+    private static void ValidateHiderVictoryAspectFit(Scene scene)
+    {
+        GameObject content = FindNamed(scene, "HiderVictoryScreen");
+        AspectRatioFitter fitter = content != null
+            ? content.GetComponent<AspectRatioFitter>()
+            : null;
+        RectTransform replay = FindNamed(scene, "ReplayButton_Hitbox")
+            ?.GetComponent<RectTransform>();
+        RectTransform menu = FindNamed(scene, "MenuButton_Hitbox")
+            ?.GetComponent<RectTransform>();
+        Require(fitter != null &&
+                fitter.aspectMode == AspectRatioFitter.AspectMode.FitInParent,
+            "Hider victory art must fit without cropping or distortion.");
+        Require(replay != null && menu != null &&
+                replay.parent == content?.transform &&
+                menu.parent == content?.transform,
+            "Hider victory hitboxes must share the aspect-fitted art container.");
+        if (fitter == null || fitter.aspectRatio <= 0f) return;
+
+        Vector2[] resolutions =
+        {
+            new Vector2(1920f, 1080f),
+            new Vector2(1600f, 900f),
+            new Vector2(1366f, 768f)
+        };
+        foreach (Vector2 resolution in resolutions)
+        {
+            float fittedWidth = Mathf.Min(
+                resolution.x,
+                resolution.y * fitter.aspectRatio);
+            float fittedHeight = fittedWidth / fitter.aspectRatio;
+            Require(fittedWidth <= resolution.x + 0.01f &&
+                    fittedHeight <= resolution.y + 0.01f &&
+                    fittedWidth > 0f && fittedHeight > 0f,
+                $"Hider victory art does not fit at {resolution.x}x{resolution.y}.");
         }
     }
 

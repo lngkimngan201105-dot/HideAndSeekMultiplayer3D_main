@@ -22,6 +22,8 @@ public enum PropHuntZonePhase
 
 public class PropHuntShrinkingZone : MonoBehaviour
 {
+    public const int SelectableAnchorLimit = 2;
+
     [Header("References")]
     [SerializeField] private PropHuntRoundManager roundManager;
     [SerializeField] private HiderPlayableAreaBounds playableArea;
@@ -67,6 +69,11 @@ public class PropHuntShrinkingZone : MonoBehaviour
     public float MediumRadius { get; private set; }
     public float FinalRadius { get; private set; } = 15f;
     public PropHuntZoneAnchor SelectedAnchor { get; private set; }
+    public int SelectableAnchorCount => zoneAnchors == null
+        ? 0
+        : Mathf.Min(
+            SelectableAnchorLimit,
+            zoneAnchors.Count(anchor => anchor != null && anchor.IsEnabledAnchor));
     public float BoundaryTolerance => boundaryTolerance;
     public bool IsZoneActive => _huntingInitialized &&
                                 roundManager != null &&
@@ -301,6 +308,7 @@ public class PropHuntShrinkingZone : MonoBehaviour
         List<PropHuntZoneAnchor> validAnchors = zoneAnchors
             .Where(anchor => anchor != null && anchor.IsEnabledAnchor && anchor.ValidateAnchor(out _))
             .ToList();
+        validAnchors = SelectMostSeparatedAnchors(validAnchors);
         if (validAnchors.Count == 0)
         {
             Debug.LogWarning("PropHuntShrinkingZone: no valid ZoneAnchor was found; PlayableArea center will be used.");
@@ -310,6 +318,32 @@ public class PropHuntShrinkingZone : MonoBehaviour
 
         SelectedAnchor = validAnchors[UnityEngine.Random.Range(0, validAnchors.Count)];
         SelectedAnchor.SetSelected(true);
+    }
+
+    private static List<PropHuntZoneAnchor> SelectMostSeparatedAnchors(
+        List<PropHuntZoneAnchor> candidates)
+    {
+        if (candidates.Count <= SelectableAnchorLimit) return candidates;
+
+        PropHuntZoneAnchor first = candidates[0];
+        PropHuntZoneAnchor second = candidates[1];
+        float bestDistance = -1f;
+        for (int left = 0; left < candidates.Count - 1; left++)
+        {
+            for (int right = left + 1; right < candidates.Count; right++)
+            {
+                Vector3 delta = candidates[left].transform.position -
+                                candidates[right].transform.position;
+                delta.y = 0f;
+                float distance = delta.sqrMagnitude;
+                if (distance <= bestDistance) continue;
+                bestDistance = distance;
+                first = candidates[left];
+                second = candidates[right];
+            }
+        }
+
+        return new List<PropHuntZoneAnchor> { first, second };
     }
 
     private void ClearSelectedAnchor()

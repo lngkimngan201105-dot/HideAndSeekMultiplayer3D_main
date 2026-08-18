@@ -851,11 +851,11 @@ PlayerSettings:
   apiCompatibilityLevel: 6
   activeInputHandler: 2
   windowsGamepadBackendHint: 0
-  cloudProjectId: f2eed863-c9d0-4d50-a08d-6d2f5947a7da
+  cloudProjectId: a6ab1384-fab0-4c5e-8e58-b0315623966c
   framebufferDepthMemorylessMode: 0
   qualitySettingsNames: []
-  projectName: HideAndSeekMultiplayer3D 2026-06-09_11-08-40
-  organizationId: tthanhdayne
+  projectName: HideAndSeekMultiplayer3D
+  organizationId: lngkimngan201105
   cloudEnabled: 0
   legacyClampBlendShapeWeights: 0
   hmiLoadingImage: {fileID: 0}

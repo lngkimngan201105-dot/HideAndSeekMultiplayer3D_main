@@ -1333,10 +1333,6 @@ public static class HiderCompleteHUDSetupTool
         Vector2[] desiredAnchorPositions =
         {
             new Vector2(-10f, 5f),
-            new Vector2(-5f, -36f),
-            new Vector2(55f, 10f),
-            new Vector2(68f, -15f),
-            new Vector2(39f, -63f),
             new Vector2(88f, -75f)
         };
 
@@ -1349,6 +1345,20 @@ public static class HiderCompleteHUDSetupTool
 
         LayerMask groundMask = groundMaskValue;
         List<PropHuntZoneAnchor> configuredAnchors = new List<PropHuntZoneAnchor>();
+        foreach (PropHuntZoneAnchor obsolete in
+                 anchorsRoot.GetComponentsInChildren<PropHuntZoneAnchor>(true))
+        {
+            if (obsolete == null) continue;
+            int suffix;
+            string[] parts = obsolete.name.Split('_');
+            if (parts.Length == 0 ||
+                !int.TryParse(parts[parts.Length - 1], out suffix) ||
+                suffix <= desiredAnchorPositions.Length)
+            {
+                continue;
+            }
+            Undo.DestroyObjectImmediate(obsolete.gameObject);
+        }
         for (int index = 0; index < desiredAnchorPositions.Length; index++)
         {
             string anchorName = $"ZoneAnchor_{index + 1:00}";

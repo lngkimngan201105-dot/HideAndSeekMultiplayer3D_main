@@ -43,12 +43,14 @@ public static class HiderEliminationValidationTool
         int activeListeners = listeners.Count(listener =>
             listener != null && listener.enabled && listener.gameObject.activeInHierarchy);
         PropHuntZoneAnchor[] anchors = UnityEngine.Object.FindObjectsOfType<PropHuntZoneAnchor>(true);
+        int enabledAnchors = anchors.Count(anchor => anchor != null && anchor.IsEnabledAnchor);
 
         Require(roundManagers.Length == 1, $"Expected 1 round manager, found {roundManagers.Length}.", failures);
         Require(rosters.Length == 1, $"Expected 1 roster, found {rosters.Length}.", failures);
         Require(hiders.Length > 0, "No true Hider was found.", failures);
         Require(spectators.Length == 1, $"Expected 1 local spectator controller, found {spectators.Length}.", failures);
-        Require(anchors.Length == 6, $"Expected 6 zone anchors, found {anchors.Length}.", failures);
+        Require(enabledAnchors == PropHuntShrinkingZone.SelectableAnchorLimit,
+            $"Expected 2 selectable zone anchors, found {enabledAnchors}.", failures);
         Require(CountNamedObjects("SpectatorStatusPanel") == 1,
             "SpectatorStatusPanel is missing or duplicated.", failures);
         Require(CountNamedObjects("SpectatorStatusText") == 1,
